@@ -240,32 +240,35 @@ def build(timing):
     place(out, crunch(0.25) * 0.8, T_I + 0.01, 0.7)
     place(out, boom(1.2, 80, 35) * 0.8, T_LD, 0.9)
     place(out, footstep(1.6, 0.3), T_LD + 0.02, 0.8)
-    # feeding: screams, bites, tears, chewing, swallows, drips
-    place(out, scream(3.4, 450), 14.35, 0.75, 0.15)
-    place(out, scream(2.8, 500), 17.9, 0.6, 0.15)
-    place(out, scream(2.2, 410), 20.4, 0.4, 0.15)
-    for tg, d in ((22.4, 1.2), (24.2, 1.3), (25.8, 1.0)):     # weakening gurgles
+    # feeding: screams, bites, tears, chewing, swallows, drips (all from the animation timeline)
+    bites = timing["BITES"]
+    shock = timing["T_SHOCK"]
+    place(out, scream(1.45, 450), T_LD + 0.05, 0.8, 0.15)
+    place(out, scream(shock - (T_LD + 1.6), 510), T_LD + 1.6, 0.75, 0.15)
+    place(out, fft_filter(noise(0.6), 400, 2500) * env_adsr(int(0.6 * SR), 0.02, 0.15, 0.5, 0.3, 0.13), shock + 0.1, 0.45, 0.15)
+    place(out, scream(0.8, 380) * 0.5, bites[1][1] + 0.05, 0.35, 0.15)
+    for tg, d in ((shock + 1.0, 1.1), (bites[1][2] + 0.3, 1.2), (bites[1][3] - 0.2, 1.0)):   # weakening gurgles
         g = fft_filter(noise(d), 150, 900) * (0.5 + 0.5 * np.sin(2 * np.pi * 7 * t_axis(int(d * SR))))
-        place(out, g * env_adsr(int(d * SR), 0.1, 0.2, 0.6, 0.4, d - 0.7) * 0.4, tg, 0.6, 0.15)
-    for tb in (15.25, 21.95):
-        place(out, crunch(0.4), tb, 1.0, -0.05)
-        place(out, growl(0.9, 60, 0.9, 1.5) * env_adsr(int(0.9 * SR), 0.01, 0.2, 0.7, 0.3, 0.3), tb + 0.05, 0.6)
-    for t0, t1, rate in ((15.3, 16.6, 6.0), (16.6, 17.45, 4.2), (22.0, 23.0, 6.5), (24.0, 25.2, 4.0)):
-        place(out, tear(t1 - t0, rate), t0, 0.75, -0.05)
-    place(out, crunch(0.3) * 1.2, 17.42, 1.0)
-    place(out, crunch(0.3) * 1.2, 25.18, 1.0)
+        place(out, g * env_adsr(int(d * SR), 0.1, 0.2, 0.6, 0.4, d - 0.7) * 0.4, tg, 0.55, 0.15)
+    for (l0, cl, t0, t1, rip, ce) in bites:
+        place(out, crunch(0.4), cl, 1.0, -0.05)
+        place(out, growl(0.9, 60, 0.9, 1.5) * env_adsr(int(0.9 * SR), 0.01, 0.2, 0.7, 0.3, 0.3), cl + 0.05, 0.6)
+        place(out, tear(t0 - cl, 5.5) * 0.7, cl + 0.02, 0.75, -0.05)
+        place(out, tear(rip - t0, 4.2), t0, 0.85, -0.05)
+        place(out, growl(rip - t0, 75, 1.1, 1.6) * 0.6, t0, 0.6)
+        place(out, crunch(0.3) * 1.3, rip, 1.0)
     chew_f = 1.55
     for k in range(int(30 * chew_f)):
         tc = (k + 0.62) / chew_f
-        if 17.6 < tc < 21.1 or tc > 25.45:
+        if any(rip + 0.3 < tc < ce for (_, _, _, _, rip, ce) in bites):
             place(out, squelch(0.17, rng.uniform(0.8, 1.2)), tc, 0.85, -0.05)
             if rng.random() < 0.5:
                 place(out, crunch(0.12) * 0.5, tc + 0.02, 0.6)
             place(out, growl(0.4, 50, 0.8, 0.6) * env_adsr(int(0.4 * SR), 0.05, 0.1, 0.5, 0.2, 0.1) * 0.4, tc - 0.2, 0.5)
-    for tg in (21.05, 28.6):
+    for tg in timing["SWALLOWS"]:
         place(out, gulp(), tg, 0.8)
     for k in range(40):
-        tp = rng.uniform(16.0, 30.0)
+        tp = rng.uniform(15.0, 30.0)
         place(out, plip(), tp, rng.uniform(0.3, 0.8), rng.uniform(-0.4, 0.4))
 
     # master: gentle compression, fade-out, normalise

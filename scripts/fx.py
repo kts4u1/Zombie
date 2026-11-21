@@ -70,10 +70,10 @@ def build(choreo, zombie, victim):
     fm = flesh_material()
 
     # --- wound / mouth blood spreading on skin and clothes
-    animate_blood_radius(victim, [(15.2, 0.0), (15.5, 0.035), (17.4, 0.08), (19.0, 0.12), (22.0, 0.15),
-                                  (25.2, 0.22), (30.0, 0.30)])
-    animate_blood_radius(zombie, [(15.3, 0.0), (15.8, 0.02), (17.5, 0.04), (21.0, 0.055), (25.3, 0.075),
-                                  (30.0, 0.09)])
+    animate_blood_radius(victim, [(14.28, 0.0), (14.6, 0.035), (16.9, 0.08), (19.0, 0.12), (21.6, 0.15),
+                                  (24.4, 0.22), (30.0, 0.30)])
+    animate_blood_radius(zombie, [(14.3, 0.0), (14.8, 0.015), (17.0, 0.03), (21.0, 0.038), (24.5, 0.046),
+                                  (30.0, 0.052)])
 
     # --- blood pool under the victim's neck (irregular, grows)
     bite0 = Vector(ev[400]["v_bite"])
@@ -90,13 +90,13 @@ def build(choreo, zombie, victim):
         v.co.y *= k * 1.35
     pool.data.materials.append(blood)
     for f in range(1, NFRAMES + 1, 3):
-        s = keys(T(f), [(15.6, 0.001), (18.0, 0.14), (22.0, 0.3), (26.0, 0.45), (30.0, 0.58)])
+        s = keys(T(f), [(14.8, 0.001), (17.0, 0.14), (21.0, 0.3), (25.0, 0.45), (30.0, 0.58)])
         _key_obj(pool, f, scale=(s, s, 1))
     pool.location.z = 0.004
 
     # --- torn flesh held in the teeth during chewing
     chunks = []
-    for ci, (t_on, t_off) in enumerate([(17.38, 21.1), (25.15, 30.5)]):
+    for ci, (t_on, t_off) in enumerate([(16.88, 21.05), (24.33, 30.5)]):
         ch = make_blob(f"Chunk{ci}", 0.028, 10 + ci, fm, detail=3, rough=0.45)
         ch.scale = (1.0, 0.7, 1.5)
         chunks.append((ch, t_on, t_off))
@@ -120,10 +120,10 @@ def build(choreo, zombie, victim):
     drops = []
     rnd = random.Random(42)
     spurts = []
-    for (t0, t1, n) in ((15.25, 15.6, 6), (16.7, 17.5, 16), (22.0, 22.4, 6), (24.1, 25.25, 18)):
+    for (t0, t1, n) in ((14.3, 14.6, 6), (15.55, 16.95, 16), (21.6, 21.9, 6), (22.6, 24.4, 18)):
         for i in range(n):
             spurts.append(("spurt", rnd.uniform(t0, t1)))
-    for (t0, t1, n) in ((17.6, 21.0, 14), (25.4, 30.0, 18)):
+    for (t0, t1, n) in ((17.1, 21.0, 14), (24.6, 30.0, 18)):
         for i in range(n):
             spurts.append(("drip", rnd.uniform(t0, t1)))
     g = 9.81

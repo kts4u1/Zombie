@@ -156,7 +156,7 @@ def build_cameras(ch, events):
     def s8(f, t):
         mid = (V(f, "z_root") + V(f, "v_root")) * 0.5
         imp = 1.0 if t > ch.T_IMPACT else 0.0
-        p = Vector((3.6, ch.vy_imp + 3.0, 1.15)) + shake(n, t, 0.015 + 0.07 * imp * math.exp(-(t - ch.T_IMPACT) * 4 if imp else 0), 3.0)
+        p = Vector((3.3, ch.vy_imp + 1.0, 1.0)) + shake(n, t, 0.015 + 0.07 * imp * math.exp(-(t - ch.T_IMPACT) * 4 if imp else 0), 3.0)
         tg = mid + Vector((0, 0, -0.15))
         return p, tg
     shot("S08_tackle", 317, 350, 24, None, s8)
@@ -174,8 +174,8 @@ def build_cameras(ch, events):
     def s10(f, t):
         m = V(f, "z_mouth")
         base = V(470, "z_mouth")
-        p = Vector((base.x - 0.78, base.y - 0.42, base.z + 0.10)) + shake(n, t, 0.006, 0.7)
-        tg = m + Vector((0, 0.04, 0.05))
+        p = Vector((base.x - 0.80, base.y - 0.45, base.z - 0.02)) + shake(n, t, 0.006, 0.7)
+        tg = m + Vector((0, 0.05, 0.04))
         return p, tg, dict(focus=(m - p).length)
     shot("S10_chew", 423, 518, 42, 2.8, s10, fill=6, fill_off=(0.3, 0.3, 0.2))
 
@@ -191,10 +191,10 @@ def build_cameras(ch, events):
     def s12(f, t):
         m = V(f, "z_mouth")
         base = V(650, "z_mouth")
-        p = Vector((base.x - 0.50, base.y - 0.30, base.z + 0.06)) + shake(n, t, 0.004, 0.8)
-        tg = m + Vector((0, 0.03, 0.035))
+        p = Vector((base.x - 0.62, base.y - 0.40, base.z + 0.0)) + shake(n, t, 0.004, 0.8)
+        tg = m + Vector((0, 0.03, 0.05))
         return p, tg, dict(focus=(m - p).length)
-    shot("S12_jaw", 611, 682, 50, 2.8, s12, fill=4, fill_off=(0.25, 0.25, 0.15))
+    shot("S12_jaw", 611, 682, 45, 2.8, s12, fill=4, fill_off=(0.25, 0.25, 0.15))
 
     # S13: final wide - the zombie hunched over the body under the flickering lamp
     def s13(f, t):

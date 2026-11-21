@@ -15,6 +15,7 @@ data = {
     "victim_steps": sorted([(p.t_on, p.kind) for s in "LR" for p in ch.V.feet[s].plants if p.t_on > 0]),
     "T_NOTICE": ch.T_NOTICE, "T_LAUNCH": ch.T_LAUNCH, "T_LEAP": ch.T_LEAP,
     "T_IMPACT": ch.T_IMPACT, "T_LAND": ch.T_LAND, "T_V_NOTICE": ch.T_V_NOTICE,
+    "BITES": [list(b) for b in ch.BITES], "SWALLOWS": list(ch.SWALLOWS), "T_SHOCK": ch.T_SHOCK,
 }
 json.dump(data, open(out, "w"), indent=1)
 print("WROTE", out, len(data["zombie_steps"]), len(data["victim_steps"]))

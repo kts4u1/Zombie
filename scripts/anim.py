@@ -354,9 +354,9 @@ class Choreo:
     T_TURN1 = 6.45
     T_LAUNCH = 6.80
     VMAX = 9.6
-    T_LEAP = 13.30
+    T_LEAP = 13.44
     T_IMPACT = 13.62
-    T_LAND = 14.25
+    T_LAND = 14.20
 
     def __init__(self, zombie, victim):
         self.Z = Poser(zombie)
@@ -404,6 +404,10 @@ class Choreo:
         self.vy_ground = self.vy_imp - 1.15
         self._zombie_plants()
         self._victim_plants()
+        aL = self.V.feet["L"].eval(self.T_IMPACT)[0]
+        aR = self.V.feet["R"].eval(self.T_IMPACT)[0]
+        self.v_feet_imp = (aL + aR) * 0.5
+        self.vy_ground = self.v_feet_imp.y - 0.62 - (self.V.hip_h - 0.06) - 0.28
 
     def z_pelvis_y(self, t):
         return float(np.interp(t, self.zt, self.zy))
@@ -555,8 +559,11 @@ class Choreo:
     def zombie(self, t, vpose):
         if t < self.T_LAUNCH:
             return self.z_idle_turn(t)
-        if t < self.T_IMPACT:
+        a0, a1 = self.T_IMPACT - 0.05, self.T_IMPACT + 0.07
+        if t < a0:
             return self.z_sprint(t)
+        if t < a1:
+            return self._blend_pose(self.z_sprint(t), self.z_ground(t, vpose), sstep(a0, a1, t))
         return self.z_ground(t, vpose)
 
     def z_idle_turn(self, t):
@@ -628,7 +635,7 @@ class Choreo:
         leap = 0.0
         if t > self.T_LEAP:
             u = (t - self.T_LEAP) / (self.T_IMPACT - self.T_LEAP)
-            leap = 0.28 * math.sin(math.pi * clamp(u) * 0.8)
+            leap = 0.12 * math.sin(math.pi * clamp(u))
         pos = Vector((x, y, base + bob + leap))
         # strong forward lean (decreasing a bit at top speed), extra in the leap
         pitch = lerp(42, 26, k) + 4 * n(t, 1.1) + (sstep(self.T_LEAP, self.T_IMPACT, t) * 22)
@@ -658,7 +665,7 @@ class Choreo:
             lat = 0.10 - 0.12 * max(a, 0) + 0.06 * max(-a, 0)
             fw += 0.05 * n(t + sg * 5, 2.5); up += 0.05 * n(t + sg * 9, 2.2)
             # reach for the prey in the leap
-            fw = lerp(fw, 0.62, leap_k); up = lerp(up, 0.05, leap_k); lat = lerp(lat, 0.12, leap_k)
+            fw = lerp(fw, 0.50, leap_k); up = lerp(up, 0.12, leap_k); lat = lerp(lat, 0.24, leap_k)
             tgt = Z.hand_from_chest(pose, s, fw, up, lat)
             pole = Vector((0, 1, -0.4)) + Vector((sg * 0.8, 0, 0))
             Z.arm_ik(pose, s, tgt, pole)
@@ -677,129 +684,200 @@ class Choreo:
         return pose
 
     # ---- feeding ----
-    def bite_state(self, t):
-        """returns dict: b (0 head raised .. 1 mouth on wound), jaw, shake, chew."""
-        b = keys(t, [(14.25, 0.0), (14.9, 0.15), (15.05, 0.25), (15.22, 1.0), (16.6, 1.0), (17.25, 0.75),
-                     (17.45, 0.0), (21.3, 0.0), (21.55, 0.25), (21.95, 1.0), (24.6, 1.0), (25.0, 0.7),
-                     (25.2, 0.0), (30.5, 0.0)])
-        return b
+    # (lunge_start, clamp, tear_start, tear_end, rip, chew_end)
+    BITES = [(13.62, 14.30, 15.55, 16.70, 16.90, 21.15),
+             (21.20, 21.60, 22.60, 24.10, 24.35, 31.0)]
+    SWALLOWS = [21.05, 28.6]
+    T_SHOCK = 16.95
+
+    def bite_params(self, t):
+        """b: 0 head raised .. 1 mouth on the wound; pull: tearing back; shake: head yaw (deg)."""
+        b = pull = shake = chew_on = 0.0
+        for i, (l0, cl, t0, t1, rip, ce) in enumerate(self.BITES):
+            if l0 <= t < rip + 0.3:
+                if t < cl:
+                    b = max(b, 0.86 + 0.14 * sstep(self.T_LAND, cl, t) if i == 0 else sstep(l0, cl, t))
+                elif t < t1:
+                    b = 1.0
+                elif t < rip:
+                    b = lerp(1.0, 0.8, sstep(t1, rip, t))
+                else:
+                    b = max(b, lerp(0.8, 0.0, sstep(rip, rip + 0.25, t)))
+                if cl <= t < t0:      # biting in, worrying the wound
+                    env = sstep(cl, cl + 0.15, t) * (1 - sstep(t0 - 0.12, t0, t))
+                    shake += 6 * env * math.sin((t - cl) * 2 * math.pi * 5.5)
+                if t0 <= t < rip:     # violent tearing
+                    env = sstep(t0, t0 + 0.12, t) * (1 - sstep(rip - 0.06, rip, t))
+                    shake += 19 * env * math.sin((t - t0) * 2 * math.pi * 4.2)
+                if t1 - 0.45 <= t < rip + 0.3:
+                    pull = max(pull, sstep(t1 - 0.45, rip, t) * (1 - sstep(rip + 0.05, rip + 0.3, t)))
+            if rip + 0.12 <= t < ce:
+                chew_on = max(chew_on, sstep(rip + 0.12, rip + 0.45, t) * (1 - sstep(ce - 0.2, ce, t)))
+        return b, pull, shake, chew_on
+
+    def v_frame(self, vpose):
+        D = vpose["D"]["root"]
+        return (vpose["H"]["root"], D @ Vector((0, -1, 0)), D @ Vector((0, 0, 1)), D @ Vector((1, 0, 0)))
+
+    def _zombie_upper(self, t, P, M, G, roll, bend, yaw, extra_pitch=0.0, max_fix=0.16):
+        """place pelvis at P, find torso pitch so the mouth reaches M while the face looks at G."""
+        Z = self.Z
+        rp = Z.rp
+        mouth_rest = self.zc.mouth
+
+        def build(theta):
+            pose = Z.begin(P, yawq(yaw) @ q_euler(theta, roll * 0.15, 0))
+            Z.spine(pose, bend=bend, side=roll * 0.1, twist=-yaw * 0.6)
+            rp.fk(pose)
+            Z.look_at(pose, G, amount=1.0, roll=roll, extra_pitch=extra_pitch)
+            return pose, rp.point(pose, "jaw", mouth_rest)
+
+        lo, hi = 0.0, 150.0
+        gr = 0.6180339887
+        c = hi - gr * (hi - lo)
+        d = lo + gr * (hi - lo)
+        fc = (build(c)[1] - M).length
+        fd = (build(d)[1] - M).length
+        for _ in range(16):
+            if fc < fd:
+                hi, d, fd = d, c, fc
+                c = hi - gr * (hi - lo)
+                fc = (build(c)[1] - M).length
+            else:
+                lo, c, fc = c, d, fd
+                d = lo + gr * (hi - lo)
+                fd = (build(d)[1] - M).length
+        theta = 0.5 * (lo + hi)
+        pose, mouth = build(theta)
+        fix = M - mouth
+        if fix.length > max_fix:
+            fix = fix.normalized() * max_fix
+        pose["root_loc"] += fix
+        rp.fk(pose)
+        self._z_theta = theta
+        return pose
+
+    def _blend_pose(self, pa, pb, w):
+        out = self.Z.rp.new_pose()
+        out["root_loc"] = pa["root_loc"].lerp(pb["root_loc"], w)
+        for k in set(pa["R"]) | set(pb["R"]):
+            qa = pa["R"].get(k, Quaternion())
+            qb = pb["R"].get(k, Quaternion())
+            out["R"][k] = qa.slerp(qb, w)
+        self.Z.rp.fk(out)
+        return out
 
     def z_ground(self, t, vpose):
         Z, V, n = self.Z, self.V, self.nz
         rp = Z.rp
-        # victim reference points
+        T0, T1 = self.T_IMPACT, self.T_LAND
+        vroot, vfront, vaxis, vlat = self.v_frame(vpose)
         bite = V.rp.point(vpose, "neck01", self.vc.bite_point)
-        v_root = vpose["H"]["root"]
-        b = self.bite_state(t)
-        # tear shakes (head yaw oscillation)
-        shake = 0.0
-        for (t0, t1, amp, fq) in ((15.25, 16.6, 8, 6.0), (16.6, 17.4, 22, 4.2), (22.0, 23.0, 9, 6.5),
-                                  (23.6, 24.0, 10, 6.0), (24.0, 25.1, 25, 4.0)):
-            if t0 <= t <= t1:
-                env = sstep(t0, t0 + 0.12, t) * (1 - sstep(t1 - 0.1, t1, t))
-                shake += amp * env * math.sin((t - t0) * 2 * math.pi * fq)
-        # chewing cycles (when head raised)
-        chew_on = (sstep(17.5, 17.8, t) * (1 - sstep(21.1, 21.3, t))) + sstep(25.3, 25.6, t)
-        chew_f = 1.55
-        cph = (t * chew_f) % 1.0
-        # opening slow (60%), closing fast & powerful (40%)
-        if cph < 0.6:
-            chew = sstep(0, 0.6, cph)
+        b, pull, shake, chew_on = self.bite_params(t)
+        falling = t < T1 + 0.05
+        uf = sstep(T0, T1, t)
+        breath = math.sin(t * 2 * math.pi * 0.45)
+        swallow = twitch(t, self.SWALLOWS, 0.12, 0.35)
+        # ---- targets in the victim's body frame
+        if falling:
+            P = vroot + vfront * lerp(0.42, 0.41, uf) + vaxis * lerp(-0.08, 0.07, uf)
+            M = bite + vfront * lerp(0.12, 0.05, uf)
+            G = bite - vfront * 0.1
+            roll = -22
         else:
-            chew = 1 - sstep(0.6, 1.0, cph) ** 0.7
-        chew_amp = 11 + 4 * n(t, 0.3)
-        swallow = twitch(t, [21.05, 28.6], 0.12, 0.35)
-        # impact/landing (13.62-14.25): falling with the victim
-        land = sstep(self.T_IMPACT, self.T_LAND, t)
-        # body posture: kneeling straddle, torso pitched over the victim
-        torso_pitch = lerp(lerp(60, 82, land), lerp(58, 104, b), sstep(self.T_LAND, 14.6, t))
-        torso_pitch += -8 * swallow + 3 * n(t, 0.8)
-        # pull-back during tearing
-        pull = 0.0
-        for (t0, t1) in ((16.6, 17.45), (24.0, 25.2)):
-            if t0 <= t <= t1:
-                pull = max(pull, sstep(t0, t1, t))
-        torso_pitch -= 14 * pull
-        yaw = 6 * n(t, 0.35) + 0.3 * shake
-        rq = yawq(yaw) @ q_euler(torso_pitch, 4 * n(t, 0.5) + 0.25 * shake, 0)
-        pose = Z.begin(Vector((0, 0, 0.6)), rq)
-        Z.spine(pose, bend=lerp(12, 34, b) - 10 * pull, side=0.4 * shake, twist=0.6 * shake)
-        # neck/head: dive toward the wound when biting, raised & chewing otherwise
-        head_pitch = lerp(-38, 18, b) + chew_on * (4 * chew) - 12 * swallow - 10 * pull
-        Z.neck_head(pose, pitch=head_pitch, yaw=shake + 14 * (1 - b) * n(t, 0.25), roll=lerp(-10, -38, b) + 0.5 * shake,
-                    neck_frac=0.55)
-        rp.fk(pose)
-        mouth = rp.point(pose, "jaw", self.zc.mouth)
-        # desired mouth position
-        if t < self.T_LAND:
-            # falling: zombie pelvis follows the impact trajectory
-            u = sstep(self.T_IMPACT, self.T_LAND, t)
-            yz = lerp(self.y_imp, self.vy_ground + 0.62, u)
-            zz = lerp(Z.hip_h - 0.0, 0.62, u) + 0.25 * math.sin(math.pi * u) * (1 - u)
-            target_root = Vector((0.03, yz, zz))
-            delta = target_root - pose["H"]["root"]
-        else:
-            hover = bite + Vector((0.04, 0.12, 0.40 + 0.03 * chew_on)) + Vector((0, 0, 0.03 * n(t, 0.6)))
-            goal = hover.lerp(bite + Vector((0.01, 0.0, 0.025)), b)
-            goal += Vector((0, 0.06 * pull, 0.03 * pull))
-            delta = goal - mouth
-            # blend in from the landing pose
-            k = sstep(self.T_LAND, 14.7, t)
-            root_land = Vector((0.03, self.vy_ground + 0.62, 0.62)) - pose["H"]["root"]
-            delta = root_land.lerp(delta, k)
-        pose["root_loc"] += delta
-        rp.fk(pose)
-        # legs: knees on the ground straddling the victim, shins flat behind
-        hipL = pose["H"]["upperleg01.L"]
-        ov_pts = {}
+            P_bite = vroot + vfront * 0.41 + vaxis * 0.08
+            P_chew = vroot + vfront * 0.31 - vaxis * 0.07
+            P = P_chew.lerp(P_bite, b) + vfront * (0.04 * pull) - vaxis * (0.06 * pull)
+            P += vfront * (0.012 * breath) + vlat * (0.02 * n(t, 0.3))
+            M_bite = bite + vfront * 0.012
+            M_hover = bite + vfront * 0.30 - vaxis * 0.17 + vlat * 0.02 + vfront * (0.02 * n(t, 0.5))
+            M = M_hover.lerp(M_bite, b) + vfront * (0.07 * pull) - vaxis * (0.05 * pull)
+            M += vfront * (0.05 * swallow) - vaxis * (0.03 * swallow)
+            G_bite = bite - vfront * 0.15
+            # chewing: head up, gaze forward along the street, slowly scanning
+            G_chew = M_hover + vaxis * 0.6 - vfront * 0.10 + vlat * (0.18 * n(t, 0.18))
+            G = G_chew.lerp(G_bite, b)
+            roll = lerp(-6, -30, b)
+        bend = lerp(8, 26, b) + 2 * breath - 10 * pull
+        yaw = 4 * n(t, 0.3) + 0.22 * shake
+        pose = self._zombie_upper(t, P, M, G, roll, bend, yaw, extra_pitch=-8 * swallow)
+        # ---- tearing: head worries the flesh (shake about the neck axis)
+        if abs(shake) > 1e-3:
+            for bn, w in (("neck02", 0.3), ("neck03", 0.3), ("head", 0.4)):
+                pose["R"][bn] = pose["R"][bn] @ q_euler(0, 0.25 * shake * w, shake * w)
+            rp.fk(pose)
+        # ---- legs: kneeling astride the victim's hips, shins flat behind
         L1 = (rp.h_rest["lowerleg01.L"] - rp.h_rest["upperleg01.L"]).length
+        s_land = sstep(T0 + 0.12, T1 + 0.1, t)
+        Droot = pose["D"]["root"]
         for s, sg in (("L", 1), ("R", -1)):
             hip = pose["H"]["upperleg01." + s]
-            hz = max(0.06, hip.z - 0.06)
-            horiz = math.sqrt(max(0.0, L1 * L1 - hz * hz))
-            knee = Vector((hip.x + sg * 0.20, hip.y + horiz * 0.85, 0.06))
-            # lift a knee occasionally (shifting weight)
-            knee.z += 0.05 * max(0, n(t + sg * 4, 0.4))
-            ankle = knee + Vector((sg * 0.05, 0.42, 0.02))
-            if t < self.T_LAND:
-                u = sstep(self.T_IMPACT, self.T_LAND, t)
-                a_air = hip + Vector((sg * 0.15, 0.7, -0.25))
-                knee = (hip + Vector((sg * 0.18, 0.3, -0.35))).lerp(knee, u)
-                ankle = a_air.lerp(ankle, u)
-            Dfoot = q_euler(lerp(70, 110, sstep(self.T_IMPACT, self.T_LAND, t)), 0, 0)
-            rp.limb_points(pose, f"upperleg01.{s}", f"upperleg02.{s}", f"lowerleg01.{s}", f"lowerleg02.{s}",
-                           f"foot.{s}", knee, ankle, Vector((0, -1, 0.2)), end_rot=Dfoot)
-        rp.fk(pose)
-        # hands: pin the victim's shoulders; right hand grabs hair/head during tearing
-        vsL = V.rp.point(vpose, "clavicle.L", V.rp.t_rest["clavicle.L"]) + Vector((0, 0, 0.07))
-        vsR = V.rp.point(vpose, "clavicle.R", V.rp.t_rest["clavicle.R"]) + Vector((0, 0, 0.07))
-        vhead = vpose["H"]["head"] + Vector((0, 0, 0.09))
-        grab_head = sstep(16.4, 16.7, t) * (1 - sstep(17.4, 17.8, t)) + sstep(23.8, 24.1, t) * (1 - sstep(25.2, 25.6, t))
-        settle = sstep(self.T_IMPACT + 0.2, 14.6, t)
-        for s, sg in (("L", 1), ("R", -1)):
-            # face to face: zombie's left hand -> victim's right shoulder and vice versa
-            if s == "L":
-                tgt = vsR
+            a_lat = 0.13
+            dz = hip.z - 0.07
+            b2 = L1 * L1 - a_lat * a_lat - dz * dz
+            if b2 > 0:
+                Kg = Vector((hip.x + sg * a_lat, hip.y - math.sqrt(b2), 0.07))
             else:
-                tgt = vsL.lerp(vhead + Vector((-0.04, -0.05, 0.0)), grab_head)
-            air = Z.hand_from_chest(pose, s, 0.55, -0.05, 0.15)
-            tgt = air.lerp(tgt + Vector((0.02 * n(t + sg, 1.5), 0.0, 0.02 * n(t + 3 * sg, 1.7))), settle)
-            Z.arm_ik(pose, s, tgt, Vector((sg * 1.0, 0.4, 0.6)))
-            Z.fingers(pose, s, curl=0.75 + 0.15 * n(t + sg * 2, 2), spread=0.7, thumb=0.6)
-        # face
+                Kg = hip + Vector((sg * a_lat, -0.04, -dz)).normalized() * L1
+            Kg.z += 0.03 * max(0.0, n(t + 3 * sg, 0.35))       # shifting weight
+            Ag = Kg + Vector((sg * 0.05, 0.44, 0.0))
+            Ag.z = 0.085
+            if s_land < 1.0:
+                Ka = hip + Droot @ Vector((sg * 0.10, 0.12, -0.42))
+                Aa = Ka + Droot @ Vector((sg * 0.03, 0.36, 0.18))
+                Kg = Ka.lerp(Kg, s_land)
+                Ag = Aa.lerp(Ag, s_land)
+            Dfoot = q_euler(lerp(70, 105, s_land), 0, 0)
+            rp.limb_points(pose, f"upperleg01.{s}", f"upperleg02.{s}", f"lowerleg01.{s}", f"lowerleg02.{s}",
+                           f"foot.{s}", Kg, Ag, Vector((0, -1, 0.4)), end_rot=Dfoot)
+            for toe in (1, 2, 3, 4, 5):
+                pose["R"][f"toe{toe}-1.{s}"] = q_euler(-30 * s_land, 0, 0)
+        rp.fk(pose)
+        # ---- arms
+        vsh = {s: V.rp.point(vpose, "upperarm01." + s, V.rp.h_rest["upperarm01." + s]) for s in ("L", "R")}
+        vchest = vpose["H"]["spine01"]
+        vhead = vpose["H"]["head"] + vaxis * 0.07
+        vuparm_L = vpose["H"]["upperarm02.L"]
+        out_w = 1 - sstep(T1 - 0.05, T1 + 0.3, t)          # arms come out from under the victim
+        for s, sg in (("L", 1), ("R", -1)):
+            other = "R" if s == "L" else "L"                   # face to face: mirror sides
+            wrap = vsh[other] - vfront * 0.10 - vaxis * 0.04
+            pin = vsh[other] + vfront * 0.075 + vaxis * 0.01
+            if s == "L":
+                bite_t = pin
+                tear_t = pin + vaxis * 0.02
+                chew_t = vchest + vfront * 0.11 - vlat * 0.06 - vaxis * 0.05
+            else:
+                bite_t = vhead + vlat * 0.075 + vfront * 0.05       # pushes the head aside
+                tear_t = vchest + vlat * 0.13 + vfront * 0.10
+                chew_t = vuparm_L + vfront * 0.055
+            ground_t = bite_t.lerp(tear_t, pull)
+            ground_t = chew_t.lerp(ground_t, clamp(b + pull))
+            ground_t += Vector((0.012 * n(t + 5 * sg, 2.0), 0.012 * n(t + 9 * sg, 2.2), 0.0))
+            tgt = ground_t.lerp(wrap, out_w)
+            f, u, l = Z.chest_frame(pose)
+            pole = l * sg * 1.0 + Vector((0, 0, 0.9)) - f * 0.3
+            Z.arm_ik(pose, s, tgt, pole)
+            Z.fingers(pose, s, curl=0.7 + 0.2 * pull + 0.1 * n(t + sg * 2, 2.0), spread=0.6, thumb=0.6)
+        # ---- face
+        l0, cl = self.BITES[0][0], self.BITES[0][1]
+        jaw_open = 0.0
+        for (l0, cl, t0, t1, rip, ce) in self.BITES:
+            if l0 <= t < cl:
+                jaw_open = max(jaw_open, sstep(l0, l0 + 0.15, t) * (1 - sstep(cl - 0.06, cl, t)))
+        cph = (t * 1.55) % 1.0
+        chew = sstep(0, 0.6, cph) if cph < 0.6 else 1 - sstep(0.6, 1.0, cph) ** 0.7
+        chew_amp = 11 + 4 * n(t, 0.3)
         if b > 0.5:
-            # mouth on the wound: wide during the lunge, clamped while tearing
-            lunge_open = 1 - sstep(15.15, 15.27, t) if t < 18 else 1 - sstep(21.85, 21.98, t)
-            jaw = lerp(5 + 2 * abs(math.sin(t * 13)), 26, lunge_open)
+            jaw = lerp(4 + 2 * abs(math.sin(t * 13)), 27, jaw_open)
             snarl = 1.0
         else:
-            jaw_raise = 20 * (1 - chew_on) * sstep(14.5, 15.0, t)
-            jaw = chew_on * (3 + chew_amp * chew) + jaw_raise + (1 - chew_on) * 6
-            snarl = 0.55 + 0.45 * (1 - chew_on) + 0.2 * chew
-        side_grind = chew_on * 3.5 * math.sin(t * chew_f * 2 * math.pi + 1.2) * (1 if int(t * chew_f) % 2 else -1)
-        Z.face(pose, jaw=jaw, snarl=snarl, lowlip=0.6 + 0.3 * chew_on * chew, jaw_side=side_grind,
+            jaw = chew_on * (3 + chew_amp * chew) + (1 - chew_on) * 7 + 18 * (1 - chew_on) * (1 - b) * sstep(14.5, 15.0, t) * 0
+            snarl = 0.5 + 0.5 * (1 - chew_on) + 0.2 * chew
+        jaw *= (1 - 0.8 * swallow)
+        grind = chew_on * 3.5 * math.sin(t * 1.55 * 2 * math.pi + 1.2) * (1 if int(t * 1.55) % 2 else -1)
+        Z.face(pose, jaw=jaw, snarl=snarl, lowlip=0.6 + 0.3 * chew_on * chew, jaw_side=grind,
                lids=0.25 * chew_on, brow=-0.8)
-        # store some info for FX
         self._z_info = dict(b=b, chew=chew * chew_on, shake=shake, pull=pull)
         return pose
 
@@ -847,60 +925,72 @@ class Choreo:
 
     def v_fall_ground(self, t):
         V, n = self.V, self.nv
-        u = sstep(self.T_IMPACT, self.T_LAND, t)
-        uf = clamp((t - self.T_IMPACT) / (self.T_LAND - self.T_IMPACT))
-        # pivot backward: pitch from -6 to -90 (face up), body slides back
-        fall_pitch = -6 - 84 * (uf ** 1.6)
+        T0, T1 = self.T_IMPACT, self.T_LAND
+        u = clamp((t - T0) / (T1 - T0))
+        # knocked off his feet: initial spin from the hit, then gravity
+        alpha = 90.0 * (0.3 * u + 0.7 * u * u)
+        ra = math.radians(alpha)
+        slide = 0.62 * (u - 0.35 * u * u) / 0.65
+        post = 0.0
         bounce = 0.0
-        if t > self.T_LAND:
-            bounce = 0.035 * math.exp(-(t - self.T_LAND) * 9) * abs(math.sin((t - self.T_LAND) * 25))
-        y = lerp(self.vy_imp, self.vy_ground, 1 - (1 - uf) ** 2)
-        z_stand = V.hip_h - 0.08
-        z_ground = 0.13
-        z = lerp(z_stand, z_ground, uf ** 1.4) + bounce
-        # struggle: pelvis bucks, twists
+        if t > T1:
+            dt_ = t - T1
+            post = 0.28 * (1 - math.exp(-dt_ * 7))
+            bounce = 0.04 * math.exp(-dt_ * 9) * abs(math.sin(dt_ * 22))
+        pivot_y = self.v_feet_imp.y - slide - post
+        hip = V.hip_h - 0.06
+        y = pivot_y - hip * math.sin(ra)
+        z = max(hip * math.cos(ra), 0.13) + bounce
         str_k = self.struggle(t)
         twist = 0.0
-        if t > self.T_LAND:
-            twist = 10 * n(t, 0.9) * str_k
-            z += 0.03 * max(0, n(t + 5, 1.5)) * str_k
-        rq = yawq(180 + twist * 0.5) @ q_euler(fall_pitch, twist * 0.4, 0)
+        if t > T1:
+            twist = 9 * n(t, 0.9) * str_k
+            z += 0.035 * max(0, n(t + 5, 1.6)) * str_k
+        rq = yawq(180 + twist * 0.4) @ q_euler(-alpha - 1.5, twist * 0.5, 0)
         pose = V.begin(Vector((0.0, y, z)), rq)
-        # curl up while falling then arch/struggle
-        V.spine(pose, bend=lerp(-10, 8, u) + 8 * str_k * n(t, 1.1), side=6 * str_k * n(t + 2, 0.8), twist=twist)
-        # head: whiplash, then turned away (to his right) exposing the left neck
-        whip = math.exp(-max(0, t - self.T_LAND) * 6) * math.sin(max(0, t - self.T_LAND) * 30) * 12
-        turn = sstep(self.T_LAND, 14.9, t)
-        V.neck_head(pose, pitch=lerp(25, -18, u) + whip + 4 * str_k * n(t, 2.2), yaw=-40 * turn + 10 * str_k * n(t, 1.3),
-                    roll=-15 * turn)
+        fold = 14 * math.sin(math.pi * u) if t <= T1 else 0.0
+        V.spine(pose, bend=fold + 6 * str_k * n(t, 1.2), side=5 * str_k * n(t + 2, 0.8), twist=twist)
+        # head: chin tucked while falling, whiplash on the asphalt, then turned away (his right)
+        whip = 0.0
+        if t > T1:
+            dt_ = t - T1
+            whip = -16 * math.exp(-dt_ * 7) * math.cos(dt_ * 26)
+        turn = sstep(T1, T1 + 0.5, t)
+        shock = sstep(self.T_SHOCK, self.T_SHOCK + 0.6, t)
+        V.neck_head(pose, pitch=lerp(22, -14, sstep(T0, T1, t)) + whip + 4 * str_k * n(t, 2.2) + 6 * shock,
+                    yaw=-42 * turn + 8 * str_k * n(t, 1.3) - 8 * shock, roll=-14 * turn)
         V.rp.fk(pose)
-        # legs: thrown up during the fall, then kicking / bending
+        # legs
         ov = {}
-        for s, sg in (("L", -1), ("R", 1)):   # facing +Y: left is -X
-            hip = pose["H"]["upperleg01." + s]
-            if t < self.T_LAND + 0.05:
-                a_stand = V.feet[s].eval(self.T_IMPACT)[0]
-                a_air = hip + Vector((sg * 0.12, 0.65, 0.15))
-                a = a_stand.lerp(a_air, sstep(0, 1, uf))
-                ov[s] = (a, yawq(180) @ q_euler(lerp(0, -30, uf), 0, 0))
+        Dv = pose["D"]["root"]
+        for s, sg in (("L", 1), ("R", -1)):
+            hipp = pose["H"]["upperleg01." + s]
+            if t <= T1 + 0.05:
+                a_stand = V.feet[s].eval(T0)[0]
+                a_body = hipp + Dv @ Vector((sg * 0.10, -0.06, -0.84))
+                a_body.z = max(0.08, a_body.z)
+                a = a_stand.lerp(a_body, sstep(0.05, 0.9, u))
+                ov[s] = (a, Dv @ q_euler(10, 0, 0))
             else:
-                kick_ph = t * 1.7 + (0 if s == "L" else 0.5)
-                kick = (math.sin(kick_ph * 2 * math.pi) * 0.5 + 0.5) * str_k
-                bend = 0.25 + 0.35 * kick + 0.15 * (1 - str_k)
-                knee_up = bend
-                # foot position: along the body axis toward +Y, sliding on ground
-                a = hip + Vector((sg * (0.18 + 0.06 * n(t + sg, 0.5)), 0.85 - 0.45 * knee_up, -0.12 + 0.05 * kick))
-                a.z = max(0.07, a.z)
-                ov[s] = (a, yawq(180) @ q_euler(-40 + 30 * kick, 0, 0))
-        V.legs_ik(pose, t, knee_dir={"L": Vector((-0.3, 0, 1)), "R": Vector((0.3, 0, 1))}, override=ov)
-        scream = (sstep(14.3, 14.6, t) * (1 - sstep(21.5, 24.0, t))) * (0.7 + 0.3 * abs(n(t, 3)))
-        gasp = sstep(24.0, 25.0, t) * (1 - sstep(27.0, 28.5, t))
-        V.face(pose, jaw=6 + 20 * scream + 8 * gasp, lowlip=0.5 * scream, brow=1.0 * scream,
-               lids=-0.5 * scream + 0.6 * sstep(26.5, 28.5, t), scream=scream)
+                ph = t * 1.8 + (0 if s == "L" else 0.5)
+                kick = (math.sin(ph * 2 * math.pi) * 0.5 + 0.5) * str_k
+                bend = 0.18 + 0.38 * kick + 0.12 * (1 - str_k) * (1 if s == "L" else 0.3)
+                a = hipp + Dv @ Vector((sg * (0.13 + 0.04 * n(t + sg, 0.5)), 0.0, -0.86 + 0.42 * bend))
+                a.z = max(0.075, a.z + 0.04 * kick)
+                ov[s] = (a, Dv @ q_euler(-35 + 30 * kick, 0, 0))
+        up = Dv @ Vector((0, -1, 0))
+        V.legs_ik(pose, t, knee_dir={"L": up + Dv @ Vector((0.3, 0, 0)), "R": up + Dv @ Vector((-0.3, 0, 0))},
+                  override=ov)
+        scream = sstep(T1 - 0.1, T1 + 0.2, t) * (1 - sstep(self.T_SHOCK, self.T_SHOCK + 0.25, t)) * (0.75 + 0.25 * abs(n(t, 3)))
+        gasp = twitch(t, [self.T_SHOCK + 0.1, 21.65, 22.9], 0.15, 0.6)
+        slack = sstep(self.T_SHOCK, self.T_SHOCK + 1.0, t)
+        V.face(pose, jaw=5 + 22 * scream + 12 * gasp + 6 * slack, lowlip=0.5 * scream, brow=1.0 * scream,
+               lids=-0.5 * scream + 0.35 * slack + 0.35 * sstep(23.0, 26.0, t), scream=scream)
         return pose
 
     def struggle(self, t):
-        return keys(t, [(14.25, 0.4), (14.6, 1.0), (19.5, 1.0), (22.5, 0.65), (25.0, 0.3), (27.0, 0.1), (28.5, 0.0)])
+        return keys(t, [(self.T_LAND, 0.6), (14.4, 1.0), (16.75, 1.0), (17.15, 0.22), (17.8, 0.1),
+                        (21.5, 0.06), (21.75, 0.32), (22.7, 0.18), (24.0, 0.05), (26.0, 0.0)])
 
     def victim_arms(self, t, vp, zp):
         V, n = self.V, self.nv
@@ -909,7 +999,6 @@ class Choreo:
             walking, flinch, back = self._v_arm_state
             for s, sg in (("L", -1), ("R", 1)):
                 if s == "R":
-                    # phone held in front of the chest
                     phone = V.hand_from_chest(vp, s, 0.27, -0.22, -0.10)
                     defend = V.hand_from_chest(vp, s, 0.32, 0.02, 0.12)
                     tgt = phone.lerp(defend, sstep(12.8, 13.35, t))
@@ -919,34 +1008,28 @@ class Choreo:
                     swing = V.hand_from_chest(vp, s, 0.06 + 0.13 * ph, -0.52, 0.05)
                     defend = V.hand_from_chest(vp, s, 0.30, 0.05, 0.15)
                     tgt = swing.lerp(defend, sstep(12.6, 13.2, t))
-                pole = V.arm_pole(vp, s)
+                V.arm_ik(vp, s, tgt, V.arm_pole(vp, s))
                 if s == "R":
-                    # wrist turned so the phone screen faces his eyes
-                    V.arm_ik(vp, s, tgt, pole)
-                    D = vp["D"]["lowerarm02.R"]
-                    V.rp.set_world(vp, "wrist.R", D @ q_axis(V.rp.B["wrist.R"] @ Vector((0, 1, 0)), 0) )
                     V.fingers(vp, s, curl=0.55 * (1 - sstep(12.8, 13.2, t)) + 0.2, spread=0.2, thumb=0.6)
                 else:
-                    V.arm_ik(vp, s, tgt, pole)
                     V.fingers(vp, s, curl=0.25 + 0.4 * sstep(12.6, 13.2, t), spread=0.5 * flinch)
             return
-        # on the ground: flailing then pushing the zombie's head / shoulders
-        u = sstep(self.T_IMPACT, self.T_LAND, t)
+        T0, T1 = self.T_IMPACT, self.T_LAND
         str_k = self.struggle(t)
-        z_head = zp["H"]["head"] + zp["D"]["head"] @ Vector((0, -0.04, 0.05))
-        z_shL = zp["H"]["upperarm01.L"]
-        z_shR = zp["H"]["upperarm01.R"]
-        for s, sg in (("L", -1), ("R", 1)):
-            fl = V.hand_from_chest(vp, s, 0.25 + 0.2 * math.sin(t * 9 + sg), 0.45, 0.35)
-            if s == "R":
-                push = z_head + Vector((0.03 * n(t, 3), 0.0, 0.0))
-            else:
-                push = z_shR + Vector((0.0, 0.02, 0.05))
-            # pushing hands jitter (effort), arms collapse as he weakens
+        vroot, vfront, vaxis, vlat = self.v_frame(vp)
+        for s, sg in (("L", 1), ("R", -1)):
+            sh = vp["H"]["upperarm01." + s]
+            # thrown up / out while falling
+            fling = V.hand_from_chest(vp, s, 0.30, 0.40, 0.42)
+            # pushing the zombie's shoulders (face to face: his right hand -> zombie's left)
+            zs = "L" if s == "R" else "R"
+            push = zp["H"]["upperarm01." + zs] + zp["D"]["upperarm01." + zs] @ Vector((0, 0.03, 0)) - vfront * 0.05
             push += Vector((0.03 * n(t + sg, 4) * str_k, 0.03 * n(t + 2 * sg, 3.5) * str_k, 0.02 * n(t + 5, 4) * str_k))
-            limp = V.hand_from_chest(vp, s, 0.05, -0.15 if s == "R" else -0.4, 0.55)
-            limp.z = max(0.05, limp.z)
-            tgt = fl.lerp(push, sstep(self.T_LAND - 0.1, 14.8, t))
-            tgt = limp.lerp(tgt, clamp(str_k * 1.4))
-            V.arm_ik(vp, s, tgt, Vector((sg * 1.0, 0.0, -0.6)))
-            V.fingers(vp, s, curl=0.35 + 0.35 * str_k, spread=0.6 * str_k, thumb=0.4)
+            # limp: palm resting on the asphalt beside his head/shoulder
+            limp = sh + vlat * (sg * 0.44) + vaxis * (0.08 if s == "L" else -0.02)
+            limp.z = 0.045
+            tgt = fling.lerp(push, sstep(T1 - 0.05, T1 + 0.25, t))
+            tgt = limp.lerp(tgt, clamp((str_k - 0.08) * 1.6))
+            V.arm_ik(vp, s, tgt, vlat * sg * 0.9 - vfront * 0.6 - vaxis * 0.2)
+            twitch_f = 0.15 * max(0.0, n(t + 7 * sg, 1.5)) * (1 - sstep(26, 28, t))
+            V.fingers(vp, s, curl=0.25 + 0.45 * str_k + twitch_f, spread=0.5 * str_k, thumb=0.4)
