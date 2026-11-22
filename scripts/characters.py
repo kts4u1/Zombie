@@ -164,6 +164,15 @@ class Character:
         c[1] = p[:, 1].min() - 0.012  # lips in front of teeth
         return c
 
+    def teeth_points(self):
+        """rest-space incisal edges (upper teeth ride the head, lower teeth the jaw)."""
+        h = self.h
+        up = h.bl[h.obj.group_vertex_indices("helper-upper-teeth")]
+        lo = h.bl[h.obj.group_vertex_indices("helper-lower-teeth")]
+        u = np.array([0.0, up[:, 1].min() + 0.004, up[:, 2].min() + 0.002])
+        l = np.array([0.0, lo[:, 1].min() + 0.006, lo[:, 2].max() - 0.002])
+        return u, l
+
     def _body_masks(self):
         ob = self.body
         co = np.array([v.co for v in ob.data.vertices])
@@ -179,6 +188,7 @@ class Character:
             # dried blood: around lips + streaks down chin/neck/chest
             m = self.mouth_point()
             self.mouth = m
+            self.teeth_up, self.teeth_lo = self.teeth_points()
             dl = np.linalg.norm((co - m) * np.array([0.8, 1.0, 1.2]), axis=1)
             dl2 = np.linalg.norm((co - (m + np.array([0, 0.0, -0.012]))) * np.array([0.9, 1.0, 1.1]), axis=1)
             dried = _smooth((0.024 - dl2) / 0.02) * 0.8

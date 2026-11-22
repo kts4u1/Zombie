@@ -47,6 +47,36 @@ def keys(t, pts):
     return pts[-1][1]
 
 
+def spline(t, pts, m0=None, m1=None):
+    """C1 Catmull-Rom (non-uniform knots) through [(t, value), ...]; value float or Vector.
+    m0 / m1: optional end tangents (d value / d t).  No stop-and-go at the knots."""
+    n = len(pts)
+    if t <= pts[0][0]:
+        return pts[0][1]
+    if t >= pts[-1][0]:
+        return pts[-1][1]
+    i = 0
+    while pts[i + 1][0] < t:
+        i += 1
+    (t0, v0), (t1, v1) = pts[i], pts[i + 1]
+
+    def tan(j):
+        if j == 0:
+            return m0 if m0 is not None else (pts[1][1] - pts[0][1]) * (1.0 / (pts[1][0] - pts[0][0]))
+        if j == n - 1:
+            return m1 if m1 is not None else (pts[-1][1] - pts[-2][1]) * (1.0 / (pts[-1][0] - pts[-2][0]))
+        return (pts[j + 1][1] - pts[j - 1][1]) * (1.0 / (pts[j + 1][0] - pts[j - 1][0]))
+
+    h = t1 - t0
+    s = (t - t0) / h
+    s2, s3 = s * s, s * s * s
+    h00 = 2 * s3 - 3 * s2 + 1
+    h10 = s3 - 2 * s2 + s
+    h01 = -2 * s3 + 3 * s2
+    h11 = s3 - s2
+    return v0 * h00 + tan(i) * (h10 * h) + v1 * h01 + tan(i + 1) * (h11 * h)
+
+
 def keys_lin(t, pts):
     if t <= pts[0][0]:
         return pts[0][1]
@@ -253,6 +283,9 @@ class Poser:
         rest_fwd = Vector((0, -1, 0))
         cur = D_parent @ rest_fwd
         cur_up = D_parent @ Vector((0, 0, 1))
+        if up is None:
+            # reference 'up' from the chest: well defined even when looking straight down
+            up = cur_up
         Dt = frame_rot(rest_fwd, Vector((0, 0, 1)), g, up)
         Dt = Dt @ q_euler(extra_pitch, roll, 0)
         Dfull = D_parent.slerp(Dt, amount) if amount < 1 else Dt
@@ -446,8 +479,9 @@ class Choreo:
         stance_on = {"L": None, "R": self.T_LAUNCH}
         for t in tlist:
             vel = self.z_speed(t)
-            fr = 1.55 + 0.72 * clamp(vel / self.VMAX)
-            beta = 0.52 - 0.28 * clamp(vel / self.VMAX)
+            fr = 1.62 + 0.66 * clamp(vel / self.VMAX)
+            # short ground contacts at speed (~0.085 s at top speed)
+            beta = 0.50 - 0.31 * clamp(vel / self.VMAX)
             phase += fr * dt
             for s in ("L", "R"):
                 c0 = (prev_phase + offs[s])
@@ -460,8 +494,11 @@ class Choreo:
                     t_on = stance_on[s]
                     t_off = t
                     tm = 0.5 * (t_on + t_off)
-                    y = self.z_pelvis_y(tm) - 0.06
-                    x = 0.075 if s == "L" else -0.075
+                    # foot strikes under / slightly behind the hips: far behind while
+                    # accelerating (pushing), almost under the pelvis at top speed
+                    kk = clamp(self.z_speed(tm) / self.VMAX)
+                    y = self.z_pelvis_y(tm) + lerp(0.24, 0.05, kk)
+                    x = 0.085 if s == "L" else -0.085
                     if t_on <= self.T_LAUNCH + 1e-3:
                         continue
                     kind = "sprint"
@@ -478,6 +515,11 @@ class Choreo:
         self.z_last_plant = last
         self.z_last = {"L": lastL, "R": lastR}
         self.sprint_events = events
+        run = [p for s in "LR" for p in F[s].plants if p.t_on >= self.T_LAUNCH - 0.5]
+        self.z_mids = sorted(0.5 * (p.t_on + p.t_off) for p in run)
+        self.z_tdL = sorted(p.t_on for p in F["L"].plants if p.t_on >= self.T_LAUNCH - 0.5)
+        # sharp nervous jerks of the head/shoulders while running
+        self.z_run_twitch = [7.55, 8.62, 9.48, 10.71, 11.83, 12.66]
 
     def _victim_plants(self):
         F = self.V.feet
@@ -552,13 +594,20 @@ class Choreo:
             z_jaw=tuple(zp["H"]["jaw"]), z_jaw_D=tuple(zp["D"]["jaw"]),
             z_head_D=tuple(zp["D"]["head"]),
             z_chin=tuple(self.Z.rp.point(zp, "jaw", self.zc.mouth + Vector((0, 0.01, -0.045)))),
+            z_tup=tuple(self.Z.rp.point(zp, "head", self.zc.teeth_up)),
+            z_tlo=tuple(self.Z.rp.point(zp, "jaw", self.zc.teeth_lo)),
+            z_neck=tuple(zp["H"]["neck02"]), z_spine1=tuple(zp["H"]["spine01"]),
+            v_neck_D=tuple(vp["D"]["neck01"]), v_chest=tuple(vp["H"]["spine01"]),
             info=dict(getattr(self, "_z_info", {})) if t >= self.T_IMPACT else {},
         )
 
     # ===================== ZOMBIE =====================
     def zombie(self, t, vpose):
-        if t < self.T_LAUNCH:
+        b0, b1 = self.T_LAUNCH - 0.06, self.T_LAUNCH + 0.16
+        if t < b0:
             return self.z_idle_turn(t)
+        if t < b1:
+            return self._blend_pose(self.z_idle_turn(t), self.z_sprint(t), sstep(b0, b1, t))
         a0, a1 = self.T_IMPACT - 0.05, self.T_IMPACT + 0.07
         if t < a0:
             return self.z_sprint(t)
@@ -612,64 +661,162 @@ class Choreo:
         Z.face(pose, jaw=jaw, snarl=snarl, lowlip=0.7 * snarl, lids=-0.2 * sstep(5.6, 5.7, t), brow=-0.8 * notice)
         return pose
 
+    # ---- sprint helpers ----
+    def _gait_phase(self, t):
+        """left-foot cycle phase psi in [0,1): 0 at left touchdown (extrapolated at the ends)."""
+        td = self.z_tdL
+        if t < td[0]:
+            per = td[1] - td[0]
+            return ((t - td[0]) / per) % 1.0
+        for a, b in zip(td[:-1], td[1:]):
+            if t < b:
+                return (t - a) / (b - a)
+        per = td[-1] - td[-2]
+        return ((t - td[-1]) / per) % 1.0
+
+    def _bob(self, t, amp):
+        """pelvis vertical offset: lowest at mid-stance, highest in flight (smooth)."""
+        m = self.z_mids
+        if t <= m[0]:
+            return -amp * sstep(m[0] - 0.25, m[0], t)
+        for a, b in zip(m[:-1], m[1:]):
+            if t < b:
+                ph = (t - a) / (b - a)
+                return -amp * math.cos(2 * math.pi * ph)
+        return -amp
+
+    def _sprint_swing(self, s, t):
+        """pelvis-relative swing path of an ankle between two sprint plants:
+        toe-off -> heel recovery (heel kicks up behind) -> knee drive -> pawing -> strike.
+        Returns (ankle, D_toe_off, D_strike, u) or None while the foot is planted."""
+        F = self.Z.feet[s]
+        P = F.plants
+        for p, q in zip(P[:-1], P[1:]):
+            if not (p.t_off < t < q.t_on) or q.kind not in ("sprint", "push") or q.t_on < self.T_LAUNCH:
+                continue
+            Tsw = q.t_on - p.t_off
+            u = (t - p.t_off) / Tsw
+            a0, D0, _ = F._stance(p, 1.0)
+            a1, D1, _ = F._stance(q, 0.0)
+            y0, y1, yp = self.z_pelvis_y(p.t_off), self.z_pelvis_y(q.t_on), self.z_pelvis_y(t)
+            f0, f1 = -(a0.y - y0), -(a1.y - y1)          # forward of the pelvis (+)
+            v0, v1 = self.z_speed(p.t_off), self.z_speed(q.t_on)
+            k = clamp(self.z_speed(0.5 * (p.t_off + q.t_on)) / self.VMAX)
+            pts_f = [(0.0, f0),
+                     (0.24, lerp(f0 + 0.10, -0.60, k)),
+                     (0.46, lerp(-0.12, -0.30, k)),
+                     (0.68, lerp(0.10, 0.16, k)),
+                     (0.86, f1 + lerp(0.06, 0.12, k)),
+                     (1.0, f1)]
+            pts_z = [(0.0, a0.z),
+                     (0.24, lerp(0.24, 0.42, k)),
+                     (0.46, lerp(0.30, 0.55, k)),
+                     (0.68, lerp(0.30, 0.46, k)),
+                     (0.86, lerp(0.16, 0.22, k)),
+                     (1.0, a1.z)]
+            fr = spline(u, pts_f, m0=-v0 * Tsw * 0.55, m1=-v1 * Tsw * 0.35)
+            zz = spline(u, pts_z, m0=0.9, m1=-0.9)
+            x = lerp(a0.x, a1.x, sstep(0.0, 1.0, u))
+            return Vector((x, yp - fr, max(zz, 0.07))), D0, D1, u
+        return None
+
+    def _sprint_leg(self, pose, s, ankle, D0, D1, u):
+        """IK a swinging leg; the foot hangs off the shank (plantar-flexed after push-off,
+        toes pulled up for the strike), blended into the plant rotations at both ends."""
+        rp = self.Z.rp
+        fwd = Vector((0, -1, 0))
+        sgn = 1 if s == "L" else -1
+        pole = fwd + Vector((sgn * 0.12, 0, 0))
+        rp.two_bone(pose, f"upperleg01.{s}", f"upperleg02.{s}", f"lowerleg01.{s}", f"lowerleg02.{s}",
+                    f"foot.{s}", ankle, pole)
+        D2 = pose["D"][f"lowerleg02.{s}"]
+        plantar = spline(u, [(0.0, 38), (0.25, 34), (0.48, 18), (0.68, -6), (0.86, -10), (1.0, 2)])
+        Df = D2 @ q_euler(plantar, 0, 0)
+        Df = D0.slerp(Df, sstep(0.0, 0.2, u))
+        Df = Df.slerp(D1, sstep(0.84, 1.0, u))
+        rp.set_world(pose, f"foot.{s}", Df)
+        tb = -lerp(30, 0, sstep(0.0, 0.4, u))
+        for toe in (1, 2, 3, 4, 5):
+            pose["R"][f"toe{toe}-1.{s}"] = q_euler(tb, 0, 0)
+
+    def _sprint_arm(self, pose, s, alpha, flex, abd, cross):
+        """angle-driven arm: alpha shoulder swing (+ forward) and abd (out) relative to the
+        trunk, flex = elbow bend; hands drift toward the midline (cross) in front."""
+        Z = self.Z
+        rp = Z.rp
+        f, u, l = Z.chest_frame(pose)
+        sg = 1 if s == "L" else -1
+        lat = l * sg
+        S = pose["H"][f"upperarm01.{s}"]
+        L1 = (rp.h_rest[f"lowerarm01.{s}"] - rp.h_rest[f"upperarm01.{s}"]).length
+        L2 = (rp.h_rest[f"wrist.{s}"] - rp.h_rest[f"lowerarm01.{s}"]).length
+        a, g, b = math.radians(alpha), math.radians(abd), math.radians(flex)
+        d_up = (-u) * math.cos(a) + f * math.sin(a)
+        d_up = (d_up * math.cos(g) + lat * math.sin(g)).normalized()
+        p = f * math.cos(a) + u * math.sin(a)
+        p = (p - d_up * p.dot(d_up)).normalized()
+        fa = (d_up * math.cos(b) + p * math.sin(b) - lat * (cross * math.sin(b))).normalized()
+        E = S + d_up * L1
+        H = E + fa * L2
+        Z.arm_ik(pose, s, H, E - (S + H) * 0.5)
+
     def z_sprint(self, t):
         Z, n = self.Z, self.nz
         v = self.z_speed(t)
         k = clamp(v / self.VMAX)
-        aL, _, _, cL = Z.feet["L"].eval(t)
-        aR, _, _, cR = Z.feet["R"].eval(t)
+        ka = k ** 0.7
+        psi = self._gait_phase(t)
+        sw = {s: self._sprint_swing(s, t) for s in ("L", "R")}
+        feet = {}
+        for s in ("L", "R"):
+            if sw[s] is not None:
+                feet[s] = sw[s][0]
+            else:
+                feet[s] = Z.feet[s].eval(t)[0]
+        aL, aR = feet["L"], feet["R"]
         y = self.z_pelvis_y(t)
-        # vertical oscillation: low in stance, high in flight
-        in_stance = cL or cR
-        x = 0.012 * math.sin(t * 2 * math.pi * 2.2) + 0.01 * n(t, 1.3)
-        # pelvis height from support foot + flight bounce
-        bob = 0.0
-        sup = [a for a, c in ((aL, cL), (aR, cR)) if c]
-        if sup:
-            # pelvis over support: compress
-            d = abs(sup[0].y - y)
-            bob = -0.035 * (1 - clamp(d / 0.55)) * k
-        else:
-            bob = 0.035 * k
-        base = Z.hip_h - lerp(0.14, 0.085, k)
+        # pelvis: crouched while driving out of the start, tall and bouncy at speed
+        tw = twitch(t, self.z_run_twitch, 0.05, 0.3)
+        lat_sway = 0.022 * k * clamp((aR.z - aL.z) / 0.35, -1, 1)
+        x = lat_sway + 0.008 * n(t, 1.3)
+        base = lerp(0.885, 0.99, ka)
+        z = base + self._bob(t, lerp(0.014, 0.032, k))
         leap = 0.0
         if t > self.T_LEAP:
             u = (t - self.T_LEAP) / (self.T_IMPACT - self.T_LEAP)
             leap = 0.12 * math.sin(math.pi * clamp(u))
-        pos = Vector((x, y, base + bob + leap))
-        # strong forward lean (decreasing a bit at top speed), extra in the leap
-        pitch = lerp(42, 26, k) + 4 * n(t, 1.1) + (sstep(self.T_LEAP, self.T_IMPACT, t) * 22)
-        # pelvis yaw follows the legs
-        phase_y = (aR.y - aL.y)
-        yaw = -clamp(phase_y / 1.2, -1, 1) * 9 * k
-        roll = 5 * math.sin(t * 2 * math.pi * 2.25) * k
+        pos = Vector((x, y, z + leap))
+        pitch = lerp(40, 17, ka) + 3 * n(t, 1.1) + sstep(self.T_LEAP, self.T_IMPACT, t) * 24
+        yaw = -clamp((aR.y - aL.y) / 1.0, -1, 1) * 10 * k
+        roll = 3.5 * k * clamp((aL.z - aR.z) / 0.35, -1, 1)
         rq = yawq(yaw) @ q_euler(pitch, roll, 0)
         pose = Z.begin(pos, rq)
-        Z.spine(pose, bend=12 + 6 * n(t, 0.9), side=-roll * 0.6, twist=-yaw * 2.4 + 6 * n(t, 1.7))
+        Z.spine(pose, bend=lerp(14, 9, k) + 3 * n(t, 0.9), side=-roll * 0.9 + 7 * tw * n(t, 3.0),
+                twist=-yaw * 2.3 + 4 * n(t, 1.7))
         Z.rp.fk(pose)
-        # head juts forward and stays locked on the victim
-        vic = Vector((0, self.v_pelvis_y(t), 1.45))
-        Z.look_at(pose, vic, amount=1.0, roll=4 * n(t, 2.0), extra_pitch=-4)
-        # arms: wild, high, clawing swing opposite to legs
-        f_ = Z.chest_frame(pose)[0]
-        leap_k = sstep(self.T_LEAP - 0.15, self.T_LEAP + 0.08, t)
-        for s, sg in (("L", 1), ("R", -1)):
-            # arm forward when the opposite foot is forward
-            aOpp = aR if s == "L" else aL
-            aSame = aL if s == "L" else aR
-            a = clamp((aSame.y - aOpp.y) / 1.1, -1, 1)  # >0 -> same-side foot is behind -> arm forward
-            amp = 1.25
-            fw = 0.05 + 0.33 * a * amp
-            fw = 0.05 + (0.33 * max(a, 0) + 0.24 * min(a, 0)) * amp
-            up = -0.30 + 0.24 * max(a, 0) + 0.02 * max(-a, 0)
-            lat = 0.10 - 0.12 * max(a, 0) + 0.06 * max(-a, 0)
-            fw += 0.05 * n(t + sg * 5, 2.5); up += 0.05 * n(t + sg * 9, 2.2)
-            # reach for the prey in the leap
-            fw = lerp(fw, 0.50, leap_k); up = lerp(up, 0.12, leap_k); lat = lerp(lat, 0.24, leap_k)
-            tgt = Z.hand_from_chest(pose, s, fw, up, lat)
-            pole = Vector((0, 1, -0.4)) + Vector((sg * 0.8, 0, 0))
-            Z.arm_ik(pose, s, tgt, pole)
-            Z.fingers(pose, s, curl=lerp(0.6, 0.35, leap_k) + 0.15 * n(t + sg, 3), spread=0.8, thumb=0.5)
+        # head locked onto the prey, jutting forward; twitchy rolls
+        vic = Vector((0, self.v_pelvis_y(t), 1.5))
+        Z.look_at(pose, vic, amount=1.0, roll=5 * n(t, 1.6) + 16 * tw, extra_pitch=-6)
+        # arms: big, loose, clawing swing opposite to the legs (left arm forward when the
+        # right leg drives forward), elbows opening as the claws reach for the prey
+        leap_k = sstep(self.T_LEAP - 0.12, self.T_LEAP + 0.1, t)
+        amp = lerp(42, 62, k)
+        mid = lerp(8, 14, k)
+        for s, ph0 in (("L", 0.45), ("R", 0.95)):
+            sg = 1 if s == "L" else -1
+            c = math.cos(2 * math.pi * (psi - ph0))
+            alpha = mid + amp * c + 7 * math.sin(4 * math.pi * (psi - ph0)) + 6 * n(t + 4 * sg, 1.4)
+            front = clamp((alpha + 40) / 120)
+            flex = lerp(88, 52, front) + 6 * n(t + 2 * sg, 1.9)
+            abd = 15 + 6 * front + 5 * n(t + 7 * sg, 0.8) + (5 if s == "R" else 0) + 14 * tw * (sg > 0)
+            cross = 0.28 * front
+            alpha = lerp(alpha, 92, leap_k)
+            flex = lerp(flex, 28, leap_k)
+            abd = lerp(abd, 24, leap_k)
+            cross = lerp(cross, 0.0, leap_k)
+            self._sprint_arm(pose, s, alpha, flex, abd, cross)
+            Z.fingers(pose, s, curl=lerp(0.62, 0.35, leap_k) + 0.12 * n(t + sg, 3), spread=0.9, thumb=0.5)
+        # legs: planted feet via the plant tracks, swinging feet via the sprint path
         ov = {}
         for s_, sg in (("L", 1), ("R", -1)):
             lp = self.z_last[s_]
@@ -679,8 +826,16 @@ class Choreo:
                 a_end = hip + Vector((sg * 0.12, 0.72 + 0.1 * sg, -0.36 + 0.14 * sg))
                 a0, D0, p0, _ = Z.feet[s_].eval(lp.t_off)
                 ov[s_] = (a0.lerp(a_end, u), q_euler(lerp(p0, 65, u), 0, 0))
-        Z.legs_ik(pose, t, override=ov or None)
-        Z.face(pose, jaw=20 + 6 * math.sin(t * 11) + 4 * n(t, 3), snarl=1.0, lowlip=0.8, lids=-0.15, brow=-1.0)
+        Z.rp.fk(pose)
+        stance = [s for s in ("L", "R") if s not in ov and sw[s] is None]
+        if stance or ov:
+            Z.legs_ik(pose, t, override=ov or None)
+        for s in ("L", "R"):
+            if s not in ov and sw[s] is not None:
+                Z.rp.fk(pose)
+                self._sprint_leg(pose, s, *sw[s])
+        jaw = 22 + 5 * math.sin(t * 9.0) + 4 * n(t, 3) + 6 * tw
+        Z.face(pose, jaw=jaw, snarl=1.0, lowlip=0.85, lids=-0.2, brow=-1.0)
         return pose
 
     # ---- feeding ----
@@ -729,10 +884,13 @@ class Choreo:
             pose = Z.begin(P, yawq(yaw) @ q_euler(theta, roll * 0.15, 0))
             Z.spine(pose, bend=bend, side=roll * 0.1, twist=-yaw * 0.6)
             rp.fk(pose)
-            Z.look_at(pose, G, amount=1.0, roll=roll, extra_pitch=extra_pitch)
+            Z.look_at(pose, G, amount=1.0, up=None, roll=roll, extra_pitch=extra_pitch)
             return pose, rp.point(pose, "jaw", mouth_rest)
 
-        lo, hi = 0.0, 150.0
+        # temporal coherence: stay near last frame's solution (no flips between minima)
+        prev = getattr(self, "_zu_prev", None)
+        coherent = prev is not None and 0.0 < t - prev[0] < 0.05
+        lo, hi = (max(0.0, prev[1] - 9.0), min(150.0, prev[1] + 9.0)) if coherent else (0.0, 150.0)
         gr = 0.6180339887
         c = hi - gr * (hi - lo)
         d = lo + gr * (hi - lo)
@@ -752,6 +910,11 @@ class Choreo:
         fix = M - mouth
         if fix.length > max_fix:
             fix = fix.normalized() * max_fix
+        if coherent:
+            dfix = fix - prev[2]
+            if dfix.length > 0.02:
+                fix = prev[2] + dfix.normalized() * 0.02
+        self._zu_prev = (t, theta, fix.copy())
         pose["root_loc"] += fix
         rp.fk(pose)
         self._z_theta = theta
@@ -782,7 +945,7 @@ class Choreo:
         if falling:
             P = vroot + vfront * lerp(0.42, 0.41, uf) + vaxis * lerp(-0.08, 0.07, uf)
             M = bite + vfront * lerp(0.12, 0.05, uf)
-            G = bite - vfront * 0.1
+            G = bite - vfront * 0.55   # far target: stable gaze while the head passes the wound
             roll = -22
         else:
             P_bite = vroot + vfront * 0.41 + vaxis * 0.08
@@ -793,7 +956,7 @@ class Choreo:
             M_hover = bite + vfront * 0.30 - vaxis * 0.17 + vlat * 0.02 + vfront * (0.02 * n(t, 0.5))
             M = M_hover.lerp(M_bite, b) + vfront * (0.07 * pull) - vaxis * (0.05 * pull)
             M += vfront * (0.05 * swallow) - vaxis * (0.03 * swallow)
-            G_bite = bite - vfront * 0.15
+            G_bite = bite - vfront * 0.5
             # chewing: head up, gaze forward along the street, slowly scanning
             G_chew = M_hover + vaxis * 0.6 - vfront * 0.10 + vlat * (0.18 * n(t, 0.18))
             G = G_chew.lerp(G_bite, b)

@@ -335,6 +335,7 @@ def main():
     ch = anim.Choreo(z, v)
     ch.run()
     environment.build(PH)
+    fx.CACHE_DIR = os.path.dirname(os.path.abspath(out))
     fx.build(ch, z, v)
     build_cameras(ch, ch.events)
     render_settings(preview)
