@@ -35,6 +35,20 @@ def _set_attr(ob, name, values):
     a.data.foreach_set("value", np.asarray(values, dtype=np.float32))
 
 
+# MakeHuman facial expression units (CC0 shape targets), driven per frame by anim.Poser.face
+EXPR_UNITS = [
+    "eyebrows-left-inner-up", "eyebrows-right-inner-up", "eyebrows-left-up", "eyebrows-right-up",
+    "eyebrows-left-down", "eyebrows-right-down",
+    "eye-left-opened-up", "eye-right-opened-up", "eye-left-closure", "eye-right-closure",
+    "eye-left-slit", "eye-right-slit",
+    "mouth-open", "mouth-retraction", "mouth-depression-retraction", "mouth-depression",
+    "mouth-upward-retraction", "mouth-corner-puller", "mouth-compression", "mouth-pursing",
+    "mouth-elevation", "mouth-eversion", "mouth-protusion", "mouth-parling",
+    "neck-platysma", "nose-left-elevation", "nose-right-elevation",
+    "nose-left-dilatation", "nose-right-dilatation", "nose-compression",
+]
+
+
 def _smooth(x):
     x = np.clip(x, 0, 1)
     return x * x * (3 - 2 * x)
@@ -63,8 +77,9 @@ class Character:
                            ("neck/neck-scale-depth-decr.target.gz", 0.5) if False else ("neck/measure-neck-circ-decr.target.gz", 0.6)]:
                 h.apply_target(rel, w)
         else:
+            self.race = {"caucasian": 0.6, "asian": 0.3, "african": 0.1}
             h.apply_macros(gender=1.0, age=0.42, muscle=0.55, weight=0.5, height=0.5,
-                           proportions=0.6, race={"caucasian": 0.6, "asian": 0.3, "african": 0.1})
+                           proportions=0.6, race=self.race)
         h.finalize()
         self.h = h
 
@@ -108,16 +123,17 @@ class Character:
         # ---- proxies
         eye_tex = os.path.join(A, "eyes/materials/grey_eye.png" if self.zombie else "eyes/materials/brown_eye.png")
         eyes, _ = mh.build_proxy(h, os.path.join(A, "eyes/high-poly/high-poly.mhclo"), self.kind + "_eyes", arm, dense)
+        self.proxies = []
         eyes.data.materials.append(sh.eye_material(self.kind + "_eyemat", eye_tex, self.zombie))
         teeth, _ = mh.build_proxy(h, os.path.join(A, "teeth/teeth_base/teeth_base.mhclo"), self.kind + "_teeth", arm, dense)
         teeth.data.materials.append(sh.teeth_material(self.kind + "_teethmat", os.path.join(A, "teeth/teeth_base/teeth.png"), self.zombie))
         tongue, _ = mh.build_proxy(h, os.path.join(A, "tongue/tongue01/tongue01.mhclo"), self.kind + "_tongue", arm, dense)
         tm = sh.teeth_material(self.kind + "_tonguemat", os.path.join(A, "tongue/tongue01/tongue01_diffuse.png"), self.zombie)
         tongue.data.materials.append(tm)
-        brows, _ = mh.build_proxy(h, os.path.join(A, "eyebrows/eyebrow001/eyebrow001.mhclo"), self.kind + "_brows", arm, dense)
+        brows, bpx = mh.build_proxy(h, os.path.join(A, "eyebrows/eyebrow001/eyebrow001.mhclo"), self.kind + "_brows", arm, dense)
         brows.data.materials.append(sh.alpha_card_material(self.kind + "_browmat", os.path.join(A, "eyebrows/eyebrow001/eyebrow001.png"),
                                                            patchy=0.35 if self.zombie else 0.0))
-        lashes, _ = mh.build_proxy(h, os.path.join(A, "eyelashes/eyelashes01/eyelashes01.mhclo"), self.kind + "_lashes", arm, dense)
+        lashes, lpx = mh.build_proxy(h, os.path.join(A, "eyelashes/eyelashes01/eyelashes01.mhclo"), self.kind + "_lashes", arm, dense)
         lashes.data.materials.append(sh.alpha_card_material(self.kind + "_lashmat", os.path.join(A, "eyelashes/eyelashes01/eyelashes01.png"),
                                                             patchy=0.5 if self.zombie else 0.0))
         hob, hpx = mh.build_proxy(h, os.path.join(A, hair), self.kind + "_hair", arm, dense)
@@ -128,6 +144,7 @@ class Character:
             rough=0.62 if self.zombie else 0.5, patchy=0.0,
             dark=0.75 if self.zombie else 1.0))
         self.parts += [eyes, teeth, tongue, brows, lashes, hob]
+        self.proxies += [(brows, bpx), (lashes, lpx), (hob, hpx)]
 
         for i, c in enumerate(clothes):
             inflate = 0.006 if (self.zombie and i == 0) else 0.0
@@ -138,8 +155,11 @@ class Character:
                                                         dirt=0.9 if self.zombie else 0.25))
             self._cloth_masks(cob, i)
             clo_objs.append(cob)
+            self.proxies.append((cob, cpx))
         self.clothes = clo_objs
         self.parts += clo_objs
+
+        self.expr = self._expression_keys() if not self.zombie else []
 
         # subdivision after deformation
         for ob in [body] + clo_objs:
@@ -152,6 +172,44 @@ class Character:
         return self
 
     # ------------------------------------------------------------------
+    def _expression_keys(self):
+        """add the MakeHuman expression units as shape keys on the body and every fitted proxy
+        (brows, lashes, hair, clothes follow the skin through their mhclo vertex weights)."""
+        h = self.h
+        race = getattr(self, "race", {"caucasian": 1.0})
+        nb = len(h.coords)
+        objs = [self.body] + [ob for ob, _ in self.proxies]
+        for ob in objs:
+            ob.shape_key_add(name="Basis", from_mix=False)
+        keyed = []
+        for u in EXPR_UNITS:
+            delta = np.zeros((nb, 3))
+            for r, w in race.items():
+                path = os.path.join(self.D, "targets/expression/units", r, u + ".target.gz")
+                if not os.path.exists(path) or w <= 0:
+                    continue
+                idx, d = mh.load_target(path)
+                delta[idx] += d * w
+            dbl = mh.mh2bl(delta)  # linear map, no ground offset
+            if np.abs(dbl).max() < 1e-7:
+                continue
+            body = self.body
+            base = np.array([v.co for v in body.data.vertices])
+            kb = body.shape_key_add(name=u, from_mix=False)
+            kb.data.foreach_set("co", (base + dbl[h.body_used]).astype(np.float32).ravel())
+            kb.slider_min, kb.slider_max = -1.0, 1.5
+            for ob, px in self.proxies:
+                n = len(ob.data.vertices)
+                pd = (dbl[px.idx] * px.w[:, :, None]).sum(axis=1)[:n]
+                if np.abs(pd).max() < 1e-6:
+                    continue
+                pb = np.array([v.co for v in ob.data.vertices])
+                k2 = ob.shape_key_add(name=u, from_mix=False)
+                k2.data.foreach_set("co", (pb + pd).astype(np.float32).ravel())
+                k2.slider_min, k2.slider_max = -1.0, 1.5
+            keyed.append(u)
+        return keyed
+
     def bone_head(self, name):
         return np.array(self.arm.data.bones[name].head_local)
 

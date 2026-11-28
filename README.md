@@ -69,54 +69,77 @@
   Mesh Cache 모디파이어로 재생하므로 모션 블러도 맞습니다. 떨어지는 핏방울은 살점 끝에서 떨어집니다.
 - 머리 방향 안정화: 목을 내려다볼 때 시선 기준축이 뒤집히던 문제를 가슴 기준 축으로 바꿔 없앴습니다.
   상체 숙임 해는 이전 프레임 근처에서만 찾아 프레임 간 점프가 없습니다.
-- 희생자는 비명을 지르며 좀비의 어깨를 밀어내고 발버둥치다가, 살점이 뜯기는 순간 쇼크로 팔이 바닥에
-  떨어지고 점점 힘이 빠집니다(IK 손이 좀비 어깨에 실제로 닿음).
 - 피 효과: 상처/입가 혈흔 확산, 찢을 때 튀는 핏방울(탄도 계산과 속도 방향 늘어남), 턱에서 떨어지는 핏방울, 커지는 피 웅덩이.
+
+**희생자 (사람)**
+- 얼굴: MakeHuman의 표정 유닛(CC0 셰이프 타깃 30개: 눈썹 안쪽 올림, 눈 크게 뜨기, 입꼬리 당김, 목 힘줄,
+  눈 감기, 콧방울 등)을 몸과 눈썹·속눈썹·머리카락·옷에 셰이프 키로 넣고, 매 프레임 공포·비명·고통·쇼크·
+  늘어짐 상태를 섞어 구동합니다. 예전의 동그란 'O'자 입 대신 실제 공포 표정이 나옵니다. 평상시에는 눈을 깜빡이고,
+  죽은 뒤에는 눈이 반쯤 뜬 채 멈춥니다. 눈동자는 휴대폰 → 좀비 → 허공을 따라 움직입니다.
+- 립싱크: 희생자 목소리 트랙의 음량 포락선(24fps, 한 프레임 앞서기)이 턱 벌림을 직접 움직이고, 소리 종류
+  (비명/헉/숨/쌕쌕거림/신음)에 따라 입 모양이 달라집니다.
+- 반응: 휴대폰에서 고개를 홱 드는 놀람 반사(어깨 움츠림, 몸 뒤로 젖힘) → 얼어붙어 가쁜 숨, 떨림 → 뒷걸음질하며
+  팔꿈치를 굽혀 손바닥을 앞으로 세운 방어 자세 → 덮치기 직전 얼굴을 돌리고 눈을 질끈 감음.
+- 쓰러짐: 엉덩이가 먼저 바닥에 닿고(0.44초, 중력 가속), 그다음 등, 마지막으로 머리가 아스팔트에 부딪혀 튕깁니다.
+  떨어지는 동안 턱을 당기고, 팔은 몸 사이에 끼었다가 바깥으로 뻗어 바닥을 짚으며, 다리는 등이 닿는 순간 들렸다가 떨어집니다.
+- 몸싸움: 목소리가 커질 때마다(비명 시작) '힘쓰기 버스트'가 생겨 좌우를 번갈아 가며 팔로 좀비 얼굴과 어깨를 밀고,
+  엉덩이를 들썩이며 몸을 비틀고, 한쪽 다리로 차고 뒤꿈치로 바닥을 긁습니다. 좀비가 머리를 흔들어 찢을 때는
+  희생자의 가슴과 어깨가 같이 끌려 흔들립니다(4.2Hz).
+- 쇼크와 죽음: 살점이 뜯기는 순간 몸이 활처럼 휘었다가 팔이 중력으로 떨어집니다(스프링/낙하 물리). 왼손이 목 상처를
+  더듬어 누르다가 힘이 빠져 미끄러지고, 두 번째 물기 때는 오른손을 힘없이 들었다 떨어뜨립니다. 숨이 점점 느려지며
+  마지막 경련 몇 번 뒤 다리를 펴고 발끝이 벌어진 비대칭 자세로 멈춥니다.
 
 **촬영 / 룩**
 - Cycles 패스트레이싱, 모션 블러(180° 셔터), 피사계 심도, 핸드헬드 카메라 흔들림.
 - 젖은 아스팔트 물웅덩이 반사, 나트륨 가로등(하나는 깜빡임), 불 켜진 창문, 밤하늘 HDRI.
 - 컴포지터: 미스트 패스 안개, 포그 글로우, 렌즈 색수차, 컬러 그레이딩, 비네팅. ffmpeg에서 필름 그레인을 더했습니다.
+- 피부: 희생자 피부는 얼룩진 붉은 기, 주근깨·모공, 부위마다 다른 유분(번들거림)으로 균일한 플라스틱 느낌을 없앴습니다.
+  옷은 원단 짜임 미세 범프와 부드러운 주름 범프, 시언(sheen)을 넣었습니다.
+- 클로즈업 4개 샷(S03 표적 고정, S07 희생자 얼굴, S10 씹는 옆얼굴, S12 턱)은 1280×720 원본 해상도, 10샘플로
+  렌더해 디테일을 살렸고 나머지는 960×540에서 올립니다. 디노이저는 OIDN 고품질(정밀 프리필터)입니다.
 
-**사운드 (`scripts/audio.py`)**
+**사운드 (`scripts/audio.py`, `scripts/voice.py`)**
 - 합성음 대신 실제 녹음 45개를 썼습니다. 모두 Freesound의 **CC0** 소리이고, 목록과 출처는 `scripts/sounds.json`에 있습니다.
-- 모든 소리는 `timing.json`의 사건 시각에 맞춰 배치됩니다.
-  - 질주 발소리(아스팔트 달리기 녹음에서 걸음 하나씩 잘라 씀)는 좀비 발이 땅에 닿는 순간마다 납니다.
-  - 희생자의 발소리는 젖은 보도를 걷는 운동화 소리입니다.
-  - 씹는 소리(Craig Smith 녹음에서 한 번씩 씹는 소리를 잘라 씀)와 젖은 으깨짐은 턱이 닫히는 순간마다 납니다.
-- 장면 흐름:
-  - 도시의 먼 차 소리와 공기음, 깜빡이는 가로등의 웅웅거림
-  - 좀비의 젖은 숨소리와 경련할 때 뼈 꺾이는 소리
-  - 표적을 발견할 때 숨 들이켜는 소리와 비명
-  - 질주 중 거친 숨과 으르렁거림
-  - 희생자의 헉 소리와 심장 박동
-  - 도약할 때의 포효, 충돌·쓰러짐·휴대폰 떨어지는 소리
-  - 물기·뼈 으스러짐·흔들며 찢기·뜯겨 나가는 소리와 피 뿜는 소리
-  - 희생자의 비명(한 배우의 목소리로 통일) → 쇼크로 끊긴 비명 → 꾸르륵거리는 질식음
-  - 씹기·쩝쩝거림·낮은 만족의 으르렁거림·삼키기
-- 레벨은 카메라 거리를 따릅니다. 클로즈업에서는 크고 와이드 샷에서는 멀게 들립니다. 짧은 거리 반사음을
-  섞고, 룩어헤드 리미터로 마스터링했습니다.
+- 소리를 직접 들을 수 없으므로 AudioSet 분류기(AST)와 CLAP 텍스트 매칭으로 후보 구간을 하나하나 판별해 골랐습니다.
+  이전 버전의 희생자 비명은 '까마귀 울음', '아기 울음', '돼지 꿀꿀'로 분류되는 구간이었고, 좀비 질주 발소리는 '말발굽'으로
+  분류됐습니다. 이번에는 이런 구간을 모두 걸러냈습니다.
+- 희생자 목소리는 **한 배우**의 연속 연기(Freesound 530471, 남성 고통 비명)를 숨 쉬는 틈에서 잘라 이야기 흐름에 놓았습니다:
+  놀란 '아!' → 얼어붙은 짧은 들숨 → 덮치기 직전 공포의 비명(충돌 순간 끊김) → 등이 닿을 때 숨이 턱 막힘 →
+  이빨이 박히는 순간부터 고통의 비명과 들숨 → 살점이 뜯기는 순간 최고조의 비명이 목 막힌 듯 끊김 →
+  피를 흘리며 쌕쌕거리는 숨(Freesound 675807, 총 맞아 죽어가는 남자의 숨) → 두 번째 물기에 힘없는 신음 → 마지막 숨.
+  웃음처럼 들릴 수 있는 흐느낌 구간(분류기가 'Snicker'로 판정)은 다른 비명으로 바꿨습니다.
+- 같은 목소리 트랙에서 립싱크 포락선과 몸싸움 버스트 시각을 뽑으므로, 입·몸·소리가 한 시계에 맞습니다. 버스트마다
+  옷 움켜쥐는 소리, 신발이 아스팔트를 긁는 소리, 발 구르는 소리, 손바닥이 살에 닿는 소리가 납니다.
+- 좀비 질주: 포장도로를 달리는 사람 녹음(547276)에서 걸음 하나씩 잘라 발이 닿는 순간마다 놓고, 달릴 때 옷이 스치는
+  소리를 깔았습니다. 딱딱한 클릭만 빠른 박자로 이어지면 말발굽처럼 들리기 때문입니다.
+- 그 밖의 흐름: 도시의 먼 차 소리와 공기음, 깜빡이는 가로등의 웅웅거림, 좀비의 젖은 숨소리와 경련할 때 뼈 꺾이는 소리,
+  표적을 발견할 때의 비명, 질주 중 거친 숨과 으르렁거림, 희생자의 심장 박동, 도약 포효, 충돌·쓰러짐·휴대폰 떨어지는 소리,
+  물기·뼈 으스러짐·흔들며 찢기·뜯겨 나가는 소리와 피 뿜는 소리, 씹기·쩝쩝거림·낮은 으르렁거림·삼키기.
+- 레벨은 카메라 거리를 따릅니다. 긴 목소리 트랙도 샷마다 음량이 바뀝니다. 짧은 거리 반사음을 섞고, 룩어헤드 리미터로
+  마스터링했습니다.
 
 ## 재현 방법
 
 ```bash
 ASSETS=$PWD/.assets bash scripts/fetch_assets.sh          # bpy(PyPI) + CC0 에셋 다운로드
-.assets/venv/bin/python scripts/build_scene.py .assets .assets/final.blend
+.assets/venv/bin/python scripts/dump_timing.py .assets .assets/timing.json        # 이야기 비트/발 접지 시각
+.assets/venv/bin/python scripts/voice.py .assets/timing.json .assets/snd/wav .assets/voice.json   # 희생자 목소리 계획 + 립싱크 포락선
+.assets/venv/bin/python scripts/build_scene.py .assets .assets/final.blend full .assets/voice.json
 .assets/venv/bin/python scripts/render.py -- .assets/final.blend 1 720 .assets/frames
-.assets/venv/bin/python scripts/dump_timing.py .assets .assets/timing.json
 .assets/venv/bin/python scripts/audio.py .assets/timing.json .assets/snd/wav .assets/audio.wav
 bash scripts/encode.sh .assets/frames .assets/audio.wav output/zombie_30s.mp4
 ```
 
-빠른 미리보기는 `build_scene.py .assets out.blend preview`로 만들 수 있습니다(640×360).
+빠른 미리보기는 `build_scene.py .assets out.blend preview .assets/voice.json`으로 만들 수 있습니다(640×360).
+`render.py`는 여러 프로세스가 같은 구간을 나눠 렌더할 수 있습니다(`rev`를 붙이면 뒤에서부터).
 
 ## 에셋 라이선스
 
 - MakeHuman 베이스 메시·타깃·리그·스킨·의상·머리카락·눈: **CC0** (MakeHuman Community)
 - 아스팔트·보도·벽돌 텍스처, 밤하늘 HDRI: **CC0** (Poly Haven)
-- 효과음 45개: **CC0** (Freesound). 녹음한 분들: craigsmith, qubodup, MrPokephile, ProductionNow, launemax,
-  vmgraw, Hupguy, Soundkrampf, bolkmar, EverydaySounds, reacthor, burning-mir, Lunardrive, derjuli, Diramus,
-  giddster, jasonLON, Wakerone, Thanra, lolamadeus, Breviceps, Sclolex, Zott820, spookymodem, ericnorcross81,
-  clif_creates, aust_paul, Mikes-MultiMedia, leonelmail, weespecky, BurghRecords, joseppujol, jawbutch,
-  bertiehs, roisin.gleeson, JadeW40 (개별 링크: `scripts/sounds.json`)
+- 효과음 45개: **CC0** (Freesound). 녹음한 분들: AlfredHitch, aust_paul, avainquin, bolkmar, Breviceps, BurghRecords,
+  burning-mir, clif_creates, craigsmith, derjuli, Diramus, ericnorcross81, EverydaySounds, giddster, Hupguy,
+  j1987, jaredpass24, jasonLON, jawbutch, leonelmail, lolamadeus, LPA134, Lunardrive, martian, Mikes-MultiMedia,
+  MrPokephile, ProductionNow, qubodup, reacthor, Sclolex, Soundkrampf, spookymodem, Thanra, Wakerone, weespecky,
+  xkeril, Zott820 (개별 링크: `scripts/sounds.json`)
 - 그 밖의 모든 코드, 애니메이션, 셰이더, 믹싱: 이 저장소에서 새로 작성

@@ -2,7 +2,7 @@
 Builds the complete 30 s zombie shot (characters, animation, environment,
 FX, 13 camera shots, render + compositor settings) and saves a .blend.
 
-usage: python build_scene.py <assets_dir> <out.blend> [preview]
+usage: python build_scene.py <assets_dir> <out.blend> [preview|full] [voice.json]
 """
 import math
 import os
@@ -226,11 +226,14 @@ def render_settings(preview=False):
     cy.adaptive_threshold = 0.05
     cy.use_denoising = True
     cy.denoiser = "OPENIMAGEDENOISE"
-    cy.denoising_prefilter = "FAST"
+    cy.denoising_prefilter = "ACCURATE"
     try:
-        cy.denoising_quality = "BALANCED"
+        cy.denoising_quality = "HIGH"
     except (AttributeError, TypeError):
         pass
+    # close-ups (S03 lock-on, S07 victim, S10 chewing profile, S12 jaw): native 720p, more samples
+    sc["hq_ranges"] = "" if preview else "133-163,289-316,423-518,611-682"
+    sc["hq_samples"] = 10
     cy.max_bounces = 3
     cy.diffuse_bounces = 1
     cy.glossy_bounces = 2
@@ -332,7 +335,13 @@ def main():
     bpy.ops.wm.read_factory_settings(use_empty=True)
     z = characters.Character("zombie", D, A).build()
     v = characters.Character("victim", D, A).build()
-    ch = anim.Choreo(z, v)
+    vpath = argv[3] if len(argv) > 3 else os.path.join(assets, "voice.json")
+    voice = None
+    if os.path.exists(vpath):
+        import json
+        voice = json.load(open(vpath))
+        print("victim voice:", vpath)
+    ch = anim.Choreo(z, v, voice=voice)
     ch.run()
     environment.build(PH)
     fx.CACHE_DIR = os.path.dirname(os.path.abspath(out))

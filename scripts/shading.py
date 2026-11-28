@@ -136,6 +136,21 @@ def skin_material(name, diffuse, zombie=False, fresh_value_node_name=None):
     rough = 0.5
     sss_w = 0.35
     col = base
+    if not zombie:
+        # living skin is never uniform: blotchy redness, uneven oiliness (T-zone sheen vs matte cheeks)
+        bl = nb.n("ShaderNodeTexNoise", in_Scale=35.0, in_Detail=6.0, in_Roughness=0.6)
+        nb.link(obj, bl.inputs["Vector"])
+        blr = ramp(nb, bl.outputs["Fac"], [(0.35, (1.0, 0.93, 0.90)), (0.65, (1.0, 1.0, 1.0))])
+        col = mix(nb, 0.8, col, blr.outputs["Color"], "MULTIPLY")
+        fr = nb.n("ShaderNodeTexNoise", in_Scale=180.0, in_Detail=3.0, in_Roughness=0.5)
+        nb.link(obj, fr.inputs["Vector"])
+        frr = ramp(nb, fr.outputs["Fac"], [(0.62, (1, 1, 1)), (0.75, (0.80, 0.66, 0.60))])   # freckles / pores
+        col = mix(nb, 0.5, col, frr.outputs["Color"], "MULTIPLY")
+        oil = nb.n("ShaderNodeTexNoise", in_Scale=9.0, in_Detail=4.0, in_Roughness=0.5)
+        nb.link(obj, oil.inputs["Vector"])
+        rough = math(nb, "ADD", math(nb, "MULTIPLY", oil.outputs["Fac"], 0.22), 0.33)
+        rough = math(nb, "ADD", rough, math(nb, "MULTIPLY", pores.outputs["Fac"], 0.12))
+        sss_w = 0.45
     if zombie:
         # dead, desaturated flesh with a cold grey-green/yellow cast
         hs = nb.n("ShaderNodeHueSaturation", in_Saturation=0.25, in_Value=0.36)
@@ -279,14 +294,29 @@ def cloth_material(name, mhmat, zombie=False, dirt=0.0):
     fresh = math(nb, "LESS_THAN", math(nb, "ADD", fa.outputs["Fac"], math(nb, "MULTIPLY", fn.outputs["Fac"], 0.08)), rad.outputs[0])
     col = mix(nb, fresh, col, (0.09, 0.003, 0.003, 1), "MIX")
     rough = math(nb, "SUBTRACT", rough, math(nb, "MULTIPLY", fresh, 0.55))
+    # fabric: fine weave + soft creases (the proxies carry no wrinkle detail of their own)
+    wv = nb.n("ShaderNodeTexNoise", in_Scale=420.0, in_Detail=2.0, in_Roughness=0.4)
+    nb.link(obj, wv.inputs["Vector"])
+    cr = nb.n("ShaderNodeTexNoise", in_Scale=14.0, in_Detail=3.0, in_Roughness=0.55, in_Distortion=1.4)
+    nb.link(obj, cr.inputs["Vector"])
+    crs = math(nb, "POWER", math(nb, "ABSOLUTE", math(nb, "SUBTRACT", cr.outputs["Fac"], 0.5)), 0.6)
+    rough = math(nb, "ADD", rough, math(nb, "MULTIPLY", wv.outputs["Fac"], 0.08)) if not isinstance(rough, float) else rough
+    col = mix(nb, 0.25, col, ramp(nb, crs, [(0.0, (0.72, 0.72, 0.72)), (0.35, (1, 1, 1))]).outputs["Color"], "MULTIPLY")
     p, out = principled(nb, Base_Color=col, Roughness=rough, Alpha=alpha)
-    p.inputs["Sheen Weight"].default_value = 0.12
+    p.inputs["Sheen Weight"].default_value = 0.25
+    p.inputs["Sheen Roughness"].default_value = 0.4
     p.inputs["Specular IOR Level"].default_value = 0.3
+    b1 = nb.n("ShaderNodeBump", in_Strength=0.06, in_Distance=0.0006)
+    nb.link(wv.outputs["Fac"], b1.inputs["Height"])
+    b2 = nb.n("ShaderNodeBump", in_Strength=0.35, in_Distance=0.012)
+    nb.link(crs, b2.inputs["Height"])
+    nb.link(b1.outputs["Normal"], b2.inputs["Normal"])
     nm = tex_node(nb, mhmat.get("normalmapTexture"), "Non-Color", uv=tc.outputs["UV"])
     if nm:
         nmn = nb.n("ShaderNodeNormalMap", in_Strength=1.0)
         nb.link(nm.outputs["Color"], nmn.inputs["Color"])
-        nb.link(nmn.outputs["Normal"], p.inputs["Normal"])
+        nb.link(nmn.outputs["Normal"], b1.inputs["Normal"])
+    nb.link(b2.outputs["Normal"], p.inputs["Normal"])
     return mat
 
 

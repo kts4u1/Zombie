@@ -251,6 +251,7 @@ class Poser:
         self.hip_h = hr["root"].z
         self.root_rest = hr["root"].copy()
         self.leg_len = (hr["lowerleg01.L"] - hr["upperleg01.L"]).length + (hr["foot.L"] - hr["lowerleg01.L"]).length
+        self.sk_frames = {}
 
     def local_rot(self, bone, q_local):
         return self.rp.B[bone] @ q_local @ self.rp.Binv[bone]
@@ -372,9 +373,109 @@ class Poser:
             R["orbicularis04." + s] = q_euler(-lids * 10, 0, 0)
             R["oculi01." + s] = q_euler(brow * 10, 0, 0)
 
+    def expr(self, pose, units):
+        """facial expression units (shape keys, 0..1.5) for this frame."""
+        sk = pose.setdefault("SK", {})
+        for k, v in units.items():
+            if v > 1e-4:
+                sk[k] = min(1.5, sk.get(k, 0.0) + v)
+
+    def eyes_at(self, pose, target, amount=1.0, limit=30.0):
+        """aim both eyeballs at a world point (clamped to a natural range)."""
+        rp = self.rp
+        rp.fk(pose)
+        Dh = pose["D"]["head"]
+        for s in ("L", "R"):
+            b = "eye." + s
+            if b not in rp.B:
+                continue
+            d = Dh.inverted() @ (Vector(target) - pose["H"][b]).normalized()
+            q = Vector((0, -1, 0)).rotation_difference(d)
+            ang = q.angle
+            if ang > math.radians(limit):
+                q = Quaternion(q.axis, math.radians(limit))
+            q = Quaternion().slerp(q, amount)
+            rp.set_world(pose, b, Dh @ q)
+
+    def eyes_dir(self, pose, pitch=0.0, yaw=0.0):
+        """eyes rotated relative to the head (deg; + pitch looks down)."""
+        Dh = pose["D"]["head"]
+        for s in ("L", "R"):
+            if "eye." + s in self.rp.B:
+                self.rp.set_world(pose, "eye." + s, Dh @ q_euler(pitch, 0, yaw))
+
+    def clavicles(self, pose, up_l=0.0, up_r=0.0, fwd=0.0):
+        """shrug (deg, + raises the shoulder) and protract (+ rolls shoulders forward)."""
+        for s, up in (("L", up_l), ("R", up_r)):
+            sg = 1 if s == "L" else -1
+            pose["R"]["clavicle." + s] = q_euler(0, -sg * up, -sg * fwd * 0.6)
+
+    def hand_frame(self, side, finger_dir, palm_normal):
+        """world wrist rotation that points the fingers along finger_dir with the palm facing palm_normal."""
+        hr = self.rp.h_rest
+        W, K = hr["wrist." + side], hr["finger3-1." + side]
+        I, P = hr["finger2-1." + side], hr["finger5-1." + side]
+        a1 = (K - W).normalized()
+        n1 = (I - P).cross(a1).normalized()
+        if n1.z > 0:
+            n1 = -n1
+        return frame_rot(a1, n1, Vector(finger_dir), Vector(palm_normal))
+
+    def arm_ik_twist(self, pose, side, target, pole, hand_rot=None, amount=1.0):
+        """arm IK; the hand roll is shared with the forearm twist bone (no candy-wrapper wrist)."""
+        rp = self.rp
+        rp.two_bone(pose, f"upperarm01.{side}", f"upperarm02.{side}", f"lowerarm01.{side}",
+                    f"lowerarm02.{side}", f"wrist.{side}", target, pole)
+        if hand_rot is None or amount <= 0:
+            return
+        D2 = pose["D"][f"lowerarm01.{side}"]
+        Dw = D2.slerp(hand_rot, amount)
+        rel = D2.inverted() @ Dw
+        hr = rp.h_rest
+        ax = (hr[f"wrist.{side}"] - hr[f"lowerarm01.{side}"]).normalized()
+        proj = Vector((rel.x, rel.y, rel.z)).dot(ax)
+        tw = Quaternion((rel.w, ax.x * proj, ax.y * proj, ax.z * proj))
+        if tw.magnitude < 1e-8:
+            tw = Quaternion()
+        tw.normalize()
+        rp.set_world(pose, f"lowerarm02.{side}", D2 @ Quaternion().slerp(tw, 0.55))
+        rp.set_world(pose, f"wrist.{side}", Dw)
+
     def finish(self, frame, pose):
         self.rp.fk(pose)
         self.rp.store(frame, pose)
+        if "SK" in pose:
+            self.sk_frames[frame] = dict(pose["SK"])
+
+    def bake_sk(self, objs):
+        """write the per-frame expression units as shape-key f-curves on every object that has them."""
+        import bpy
+        from rigpose import bpy_new_action
+        if not self.sk_frames:
+            return
+        frames = sorted(self.sk_frames)
+        names = sorted({k for f in frames for k in self.sk_frames[f]})
+        for ob in objs:
+            key = ob.data.shape_keys
+            if key is None:
+                continue
+            if key.animation_data is None:
+                key.animation_data_create()
+            act = bpy_new_action(ob.name + "_expr")
+            for nm in names:
+                if nm not in key.key_blocks:
+                    continue
+                fc = act.fcurves.new(f'key_blocks["{nm}"].value')
+                vals = [self.sk_frames[f].get(nm, 0.0) for f in frames]
+                fc.keyframe_points.add(len(frames))
+                co = np.empty(2 * len(frames), dtype=np.float32)
+                co[0::2] = frames
+                co[1::2] = vals
+                fc.keyframe_points.foreach_set("co", co)
+                for kp in fc.keyframe_points:
+                    kp.interpolation = "LINEAR"
+                fc.update()
+            key.animation_data.action = act
 
 
 # ----------------------------------------------------------------------------
@@ -391,7 +492,8 @@ class Choreo:
     T_IMPACT = 13.62
     T_LAND = 14.20
 
-    def __init__(self, zombie, victim):
+    def __init__(self, zombie, victim, voice=None):
+        self.voice = voice
         self.Z = Poser(zombie)
         self.V = Poser(victim)
         self.zc, self.vc = zombie, victim
@@ -576,11 +678,15 @@ class Choreo:
             vpose = self.victim_body(t)
             zpose = self.zombie(t, vpose)
             self.victim_arms(t, vpose, zpose)
+            if self.T_NOTICE <= t < self.T_IMPACT:
+                # the zombie's eyes lock onto the prey
+                self.Z.eyes_at(zpose, vpose["H"]["head"] + Vector((0, 0, 0.08)), 1.0, limit=32)
             self.V.finish(f, vpose)
             self.Z.finish(f, zpose)
             self.record(f, t, zpose, vpose)
         self.Z.rp.bake("zombie_anim")
         self.V.rp.bake("victim_anim")
+        self.V.bake_sk([self.vc.body] + [ob for ob, _ in getattr(self.vc, "proxies", [])])
 
     def record(self, f, t, zp, vp):
         ev = self.events.setdefault("frames", {})
@@ -1045,154 +1151,438 @@ class Choreo:
         return pose
 
     # ===================== VICTIM =====================
+    T_SEAT = 14.06        # buttocks hit the asphalt (back follows at T_LAND)
+
+    def _voice_at(self, t):
+        """victim voice: (envelope 0..1, kind) at time t, from voice.json (lip sync / effort)."""
+        vo = self.voice
+        if not vo:
+            k = "scream" if (12.92 < t < 13.64 or 14.36 < t < 16.78 or 16.8 < t < 17.35) else "none"
+            return (0.7 if k == "scream" else 0.0), k
+        x = t * FPS
+        i = int(x)
+        env = vo["env"]
+        a = env[min(max(i, 0), len(env) - 1)]
+        b = env[min(max(i + 1, 0), len(env) - 1)]
+        k = vo["kind"][min(max(int(round(x)), 0), len(env) - 1)]
+        return lerp(a, b, x - i), k
+
+    def _prep_voice(self):
+        """effort envelope + struggle bursts derived from the voice, so the body fights when he screams."""
+        TL, cl, rip = self.T_LAND, self.BITES[0][1], self.BITES[0][4]
+        fr = np.arange(NFRAMES) / FPS
+        env = np.array([self._voice_at(t)[0] for t in fr])
+        eff = np.zeros_like(env)
+        for i in range(1, len(env)):
+            k = 0.55 if env[i] > eff[i - 1] else 0.12
+            eff[i] = eff[i - 1] + k * (env[i] - eff[i - 1])
+        self.v_eff = eff
+        import voice as _voice
+        self.v_bursts = _voice.bursts(list(env), {"T_LAND": TL, "BITES": self.BITES})
+
+    def _burst(self, t, dur=0.42):
+        """(strength 0..1, lead side +-1, phase) of the struggle burst active at t."""
+        best, side, ph = 0.0, 1, 0.0
+        for (tb, sd, a) in getattr(self, "v_bursts", []):
+            x = (t - tb + 0.06) / dur
+            if 0.0 <= x < 1.6:
+                v = a * (sstep(0.0, 0.25, x) * (1 - sstep(0.55, 1.6, x)))
+                if v > best:
+                    best, side, ph = v, sd, x
+        return min(1.0, best), side, ph
+
     def victim_body(self, t):
-        V, n = self.V, self.nv
+        if not hasattr(self, "v_bursts"):
+            self._prep_voice()
         if t < self.T_IMPACT:
-            return self.v_standing(t)
-        return self.v_fall_ground(t)
+            pose = self.v_standing(t)
+        else:
+            pose = self.v_fall_ground(t)
+        self.v_face(pose, t)
+        return pose
+
+    # ---------------- standing: walking on his phone, startle, freeze, backpedal
+    def _v_stand_params(self, t):
+        TN = self.T_V_NOTICE
+        n = self.nv
+        walking = 1 - sstep(TN, self.T_V_STOP, t)
+        jolt = twitch(t, [TN + 0.03], 0.08, 0.5)
+        fear = sstep(TN, TN + 0.2, t)
+        back = sstep(12.78, 13.45, t)
+        brace = sstep(13.36, 13.58, t)
+        breath = math.sin(2 * math.pi * 2.3 * (t - TN)) * fear * (1 - 0.6 * back)
+        trem = fear * (0.6 * n(t, 7.0) + 0.4 * n(t + 3.0, 11.0))
+        return walking, jolt, fear, back, brace, breath, trem
+
+    def _v_stand_root(self, t):
+        V = self.V
+        aL = V.feet["L"].eval(t)[0]
+        aR = V.feet["R"].eval(t)[0]
+        walking, jolt, fear, back, brace, breath, trem = self._v_stand_params(t)
+        mid = (aL + aR) * 0.5
+        dy = abs(aL.y - aR.y)
+        bob = 0.025 * clamp(1 - dy / 0.7) * walking
+        ph = t * 2 * math.pi * 0.9
+        crouch = 0.035 * jolt + 0.05 * back + 0.04 * brace
+        pos = Vector((mid.x * 0.6 + 0.015 * math.sin(ph) * walking, self.v_pelvis_y(t), V.hip_h - 0.03 - bob - crouch))
+        pitch = 4 * walking + 3 * jolt - 8 * back - 5 * brace
+        yaw = 180 + 5 * math.sin(ph) * walking + 12 * back + 10 * brace
+        roll = 2 * math.sin(ph) * walking
+        return pos, yaw, pitch, roll
 
     def v_standing(self, t):
         V, n = self.V, self.nv
-        aL, _, _, cL = V.feet["L"].eval(t)
-        aR, _, _, cR = V.feet["R"].eval(t)
-        y = self.v_pelvis_y(t)
-        mid = (aL + aR) * 0.5
-        walking = 1 - sstep(self.T_V_NOTICE, self.T_V_STOP, t)
-        # pelvis bob: lowest at double support
-        dy = abs(aL.y - aR.y)
-        bob = 0.025 * clamp(1 - dy / 0.7) * walking
-        x = lerp(mid.x, mid.x, 1) + 0.025 * math.sin(t * 2 * math.pi * 0.9) * walking
-        flinch = sstep(self.T_V_NOTICE, self.T_V_NOTICE + 0.25, t)
-        back = sstep(12.85, 13.6, t)
-        pos = Vector((x * 0.6, y, V.hip_h - 0.03 - bob - 0.04 * flinch))
-        pitch = 4 * walking - 6 * flinch - 6 * back
-        yaw = 180 + 5 * math.sin(t * 2 * math.pi * 0.9) * walking
-        rq = yawq(yaw) @ q_euler(pitch, 2 * math.sin(t * 2 * math.pi * 0.9) * walking, 0)
-        pose = V.begin(pos, rq)
-        V.spine(pose, bend=6 * walking - 10 * flinch, twist=-5 * math.sin(t * 2 * math.pi * 0.9) * walking)
+        TN = self.T_V_NOTICE
+        walking, jolt, fear, back, brace, breath, trem = self._v_stand_params(t)
+        pos, yaw, pitch, roll = self._v_stand_root(t)
+        pose = V.begin(pos, yawq(yaw) @ q_euler(pitch, roll, 0))
+        ph = t * 2 * math.pi * 0.9
+        V.spine(pose, bend=6 * walking + 8 * jolt + 6 * back + 10 * brace + 1.4 * breath,
+                side=0.8 * trem, twist=-5 * math.sin(ph) * walking - 10 * back - 8 * brace)
+        shrug = 13 * jolt + 6 * fear + 9 * brace + 2.5 * breath
+        V.clavicles(pose, shrug, shrug, fwd=5 * back + 8 * brace)
         V.rp.fk(pose)
-        zpos = Vector((0, self.z_pelvis_y(t), 1.5))
-        if t < self.T_V_NOTICE:
+        zh = Vector((0.0, self.z_pelvis_y(t) - 0.25, 1.30))
+        if t < TN:
             V.neck_head(pose, pitch=28 + 2 * n(t, 0.5), yaw=3 * n(t, 0.3), roll=2)
         else:
-            look = sstep(self.T_V_NOTICE, self.T_V_NOTICE + 0.18, t)
+            look = sstep(TN, TN + 0.13, t)
             V.neck_head(pose, pitch=28 * (1 - look), yaw=3 * (1 - look), roll=2)
-            if look > 0:
-                V.look_at(pose, zpos, amount=look, extra_pitch=-5 * look)
-        self._v_arm_state = (walking, flinch, back)
+            V.look_at(pose, zh, amount=look, extra_pitch=-3 * look)
+            # head draws back and turns away from the blow while the eyes stay on it
+            away = 8 * back + 26 * brace
+            for b, w in (("neck02", 0.3), ("neck03", 0.3), ("head", 0.4)):
+                pose["R"][b] = pose["R"][b] @ q_euler((-6 * jolt + 6 * brace + 1.5 * trem) * w, -4 * brace * w, away * w)
+            V.rp.fk(pose)
+        self._v_arm_state = (walking, jolt, fear, back, brace, breath, trem)
+        self._v_look = zh
         V.legs_ik(pose, t)
-        scream = sstep(12.9, 13.2, t)
-        V.face(pose, jaw=4 + 18 * flinch + 6 * scream, lowlip=0.3 * flinch, brow=1.0 * flinch, lids=-0.4 * flinch,
-               scream=scream)
         return pose
+
+    # ---------------- knocked down: hips first, then the back, then the head
+    def _v_lie(self, t):
+        """root position / lying angle for the fall and the ground (no struggle terms)."""
+        T0, TS, TL = self.T_IMPACT, self.T_SEAT, self.T_LAND
+        p0, yaw0, pitch0, roll0 = self._v_stand_root(T0)
+        a0 = -pitch0
+        w = clamp((t - T0) / (TS - T0))
+        u = clamp((t - T0) / (TL - T0))
+        alpha = a0 + (90.0 - a0) * (0.16 * u + 0.84 * u ** 2.3)
+        y_seat = self.vy_ground + 0.20
+        if t <= TS:
+            y = p0.y + (y_seat - p0.y) * (1 - (1 - w) ** 1.7)
+            z = p0.z - (p0.z - 0.14) * w ** 2.0
+        else:
+            dt_ = t - TS
+            y = y_seat + (self.vy_ground - y_seat) * (1 - math.exp(-dt_ * 6.5))
+            z = lerp(0.14, 0.12, sstep(TS, TL + 0.1, t)) + 0.03 * math.exp(-dt_ * 11) * abs(math.sin(dt_ * 19))
+        if t > TL:
+            dt_ = t - TL
+            alpha += -5 * math.exp(-dt_ * 9) * math.sin(dt_ * 24)   # the back bounces on the asphalt
+        yaw = lerp(yaw0, 180.0, sstep(T0, TL, t))
+        x = lerp(p0.x, 0.0, sstep(T0, TL, t))
+        return Vector((x, y, z)), yaw, alpha
 
     def v_fall_ground(self, t):
         V, n = self.V, self.nv
-        T0, T1 = self.T_IMPACT, self.T_LAND
-        u = clamp((t - T0) / (T1 - T0))
-        # knocked off his feet: initial spin from the hit, then gravity
-        alpha = 90.0 * (0.3 * u + 0.7 * u * u)
-        ra = math.radians(alpha)
-        slide = 0.62 * (u - 0.35 * u * u) / 0.65
-        post = 0.0
-        bounce = 0.0
-        if t > T1:
-            dt_ = t - T1
-            post = 0.28 * (1 - math.exp(-dt_ * 7))
-            bounce = 0.04 * math.exp(-dt_ * 9) * abs(math.sin(dt_ * 22))
-        pivot_y = self.v_feet_imp.y - slide - post
-        hip = V.hip_h - 0.06
-        y = pivot_y - hip * math.sin(ra)
-        z = max(hip * math.cos(ra), 0.13) + bounce
-        str_k = self.struggle(t)
-        twist = 0.0
-        if t > T1:
-            twist = 9 * n(t, 0.9) * str_k
-            z += 0.035 * max(0, n(t + 5, 1.6)) * str_k
-        rq = yawq(180 + twist * 0.4) @ q_euler(-alpha - 1.5, twist * 0.5, 0)
-        pose = V.begin(Vector((0.0, y, z)), rq)
-        fold = 14 * math.sin(math.pi * u) if t <= T1 else 0.0
-        V.spine(pose, bend=fold + 6 * str_k * n(t, 1.2), side=5 * str_k * n(t + 2, 0.8), twist=twist)
-        # head: chin tucked while falling, whiplash on the asphalt, then turned away (his right)
+        T0, TS, TL = self.T_IMPACT, self.T_SEAT, self.T_LAND
+        l0, cl, t0, t1, rip, ce = self.BITES[0]
+        TSH = self.T_SHOCK
+        pos, yaw, alpha = self._v_lie(t)
+        # ---- how much fight is left
+        fight = keys(t, [(TL, 0.75), (cl, 1.0), (rip - 0.05, 1.0), (TSH + 0.2, 0.25), (TSH + 1.2, 0.08),
+                         (21.4, 0.04), (21.75, 0.22), (22.6, 0.08), (24.4, 0.0)])
+        bst, bside, bph = self._burst(t)
+        bst *= clamp(fight * 1.15)
+        eff = float(self.v_eff[min(NFRAMES - 1, int(round(t * FPS)))]) * fight
+        b, pull, shake, chew_on = self.bite_params(t)
+        tear_w = sum(sstep(bt0, bt0 + 0.1, t) * (1 - sstep(brip, brip + 0.12, t)) for (_, _, bt0, _, brip, _) in self.BITES)
+        rip_jolt = twitch(t, [rip + 0.02], 0.06, 0.5) + 0.5 * twitch(t, [self.BITES[1][4] + 0.02], 0.06, 0.4)
+        clamp_jolt = twitch(t, [cl + 0.01], 0.06, 0.45) + 0.4 * twitch(t, [self.BITES[1][1] + 0.01], 0.06, 0.35)
+        agonal = twitch(t, [24.75, 25.35, 25.9, 26.8], 0.05, 0.35) * (1 - sstep(27.0, 28.0, t))
+        ground = sstep(TL - 0.02, TL + 0.12, t)
+        # ---- breathing: panting in the fight, fast shallow in shock, slowing to nothing
+        rate = keys(t, [(TL, 1.1), (TSH, 1.2), (TSH + 0.5, 1.6), (21.0, 1.0), (24.3, 0.6), (26.0, 0.25)])
+        amp = keys(t, [(TL, 1.0), (TSH, 1.0), (TSH + 0.5, 1.6), (21.0, 1.0), (24.3, 0.6), (26.5, 0.0)])
+        self._v_breath_ph = getattr(self, "_v_breath_ph", 0.0)
+        bre = amp * math.sin(2 * math.pi * rate * t)
+        # ---- writhing / bucking (only on the ground)
+        buck = ground * (0.055 * bst * (1 if bph < 0.9 else 0.6) + 0.015 * eff)
+        roll = ground * (9 * bst * bside + 3 * fight * n(t, 0.7)) + 4 * rip_jolt
+        roll += 3.0 * tear_w * math.sin(2 * math.pi * 4.2 * t + 0.6)          # yanked by the tearing
+        alpha_eff = alpha - ground * (7 * pull + 4 * rip_jolt + 2.5 * clamp_jolt)   # shoulders lifted by the pull
+        pos = pos + Vector((0.0, 0.0, buck + 0.012 * agonal))
+        rq = yawq(yaw + ground * 3 * bside * bst) @ q_euler(-alpha_eff - 1.5, roll, 0)
+        pose = V.begin(pos, rq)
+        # ---- spine
+        u = clamp((t - T0) / (TL - T0))
+        fall_bend = keys(t, [(T0, 0.0), (T0 + 0.10, -14.0), (T0 + 0.3, 10.0), (TS, 22.0), (TL, 12.0), (TL + 0.25, 4.0)])
+        bend = fall_bend + ground * (-8 * bst + 2.5 * eff - 9 * rip_jolt + 5 * clamp_jolt + 1.6 * bre)
+        side = ground * (6 * bst * bside + 4 * fight * n(t + 2, 0.6)) + 2.5 * tear_w * math.sin(2 * math.pi * 4.2 * t)
+        twist = ground * (10 * bst * bside + 5 * fight * n(t + 7, 0.5))
+        V.spine(pose, bend=bend, side=side, twist=twist)
+        V.clavicles(pose, 6 * bst + 4 * rip_jolt + 1.5 * bre, 6 * bst + 4 * rip_jolt + 1.5 * bre, fwd=4 * bst)
+        # ---- head: tucked while falling, whips back on the asphalt, then turned away from the bite
         whip = 0.0
-        if t > T1:
-            dt_ = t - T1
-            whip = -16 * math.exp(-dt_ * 7) * math.cos(dt_ * 26)
-        turn = sstep(T1, T1 + 0.5, t)
-        shock = sstep(self.T_SHOCK, self.T_SHOCK + 0.6, t)
-        V.neck_head(pose, pitch=lerp(22, -14, sstep(T0, T1, t)) + whip + 4 * str_k * n(t, 2.2) + 6 * shock,
-                    yaw=-42 * turn + 8 * str_k * n(t, 1.3) - 8 * shock, roll=-14 * turn)
+        if t > TL:
+            dt_ = t - TL - 0.04
+            whip = -18 * math.exp(-max(0, dt_) * 7) * math.cos(max(0, dt_) * 24) if dt_ > 0 else 0.0
+        tuck = keys(t, [(T0, 0.0), (T0 + 0.12, -8.0), (TS, 30.0), (TL, 26.0), (TL + 0.06, 0.0)])
+        turn = sstep(TL, TL + 0.45, t)
+        thrash = ground * fight * (14 * bst * bside + 6 * n(t, 1.6))
+        dead = sstep(24.4, 26.5, t)
+        shock = sstep(TSH, TSH + 0.6, t)
+        hp = tuck * (1 - ground) + ground * (-12 + 4 * eff + 6 * shock + 8 * clamp_jolt - 6 * rip_jolt) + whip
+        hy = -40 * turn + thrash - 6 * shock + 10 * shock * (1 - dead) * n(t, 0.15) - 14 * dead
+        hr = -12 * turn + 4 * bst * bside - 6 * dead
+        V.neck_head(pose, pitch=hp, yaw=hy, roll=hr)
         V.rp.fk(pose)
-        # legs
-        ov = {}
+        self._head_on_ground(pose)
+        # ---- legs
         Dv = pose["D"]["root"]
+        vroot, vfront, vaxis, vlat = self.v_frame(pose)
+        ov, kd = {}, {}
         for s, sg in (("L", 1), ("R", -1)):
             hipp = pose["H"]["upperleg01." + s]
-            if t <= T1 + 0.05:
-                a_stand = V.feet[s].eval(T0)[0]
-                a_body = hipp + Dv @ Vector((sg * 0.10, -0.06, -0.84))
-                a_body.z = max(0.08, a_body.z)
-                a = a_stand.lerp(a_body, sstep(0.05, 0.9, u))
-                ov[s] = (a, Dv @ q_euler(10, 0, 0))
+            a_stand = V.feet[s].eval(T0)[0]
+            # leg positions in the body frame (sg: + = his left)
+            bent = vroot - vaxis * 0.50 + vlat * (sg * 0.14)
+            straight = vroot - vaxis * 0.76 + vlat * (sg * 0.15)
+            limp_l = vroot - vaxis * (0.75 if s == "L" else 0.77) + vlat * (sg * (0.19 if s == "L" else 0.16))
+            if t < TS:
+                # dragged with the body, then the feet leave the ground
+                w = clamp((t - T0) / (TS - T0))
+                drag = Vector((0.0, (pos.y - self._v_stand_root(T0)[0].y) * 0.45, 0.0))
+                a = (a_stand + drag).lerp(bent, sstep(0.25, 1.0, w))
+                a.z = max(0.08, a.z) + 0.10 * sstep(0.5, 1.0, w)
+                D = yawq(180) @ q_euler(lerp(0, 40, w), 0, 0)
             else:
-                ph = t * 1.8 + (0 if s == "L" else 0.5)
-                kick = (math.sin(ph * 2 * math.pi) * 0.5 + 0.5) * str_k
-                bend = 0.18 + 0.38 * kick + 0.12 * (1 - str_k) * (1 if s == "L" else 0.3)
-                a = hipp + Dv @ Vector((sg * (0.13 + 0.04 * n(t + sg, 0.5)), 0.0, -0.86 + 0.42 * bend))
-                a.z = max(0.075, a.z + 0.04 * kick)
-                ov[s] = (a, Dv @ q_euler(-35 + 30 * kick, 0, 0))
-        up = Dv @ Vector((0, -1, 0))
-        V.legs_ik(pose, t, knee_dir={"L": up + Dv @ Vector((0.3, 0, 0)), "R": up + Dv @ Vector((-0.3, 0, 0))},
-                  override=ov)
-        scream = sstep(T1 - 0.1, T1 + 0.2, t) * (1 - sstep(self.T_SHOCK, self.T_SHOCK + 0.25, t)) * (0.75 + 0.25 * abs(n(t, 3)))
-        gasp = twitch(t, [self.T_SHOCK + 0.1, 21.65, 22.9], 0.15, 0.6)
-        slack = sstep(self.T_SHOCK, self.T_SHOCK + 1.0, t)
-        V.face(pose, jaw=5 + 22 * scream + 12 * gasp + 6 * slack, lowlip=0.5 * scream, brow=1.0 * scream,
-               lids=-0.5 * scream + 0.35 * slack + 0.35 * sstep(23.0, 26.0, t), scream=scream)
+                # legs fly up as the back slams down, then the fight
+                fly = math.sin(math.pi * clamp((t - TS) / 0.42)) * (1 - sstep(TL + 0.3, TL + 0.4, t))
+                kick_on = bst * (1 if bside == sg else 0.35)
+                kick = sstep(0.0, 0.35, bph) * (1 - sstep(0.5, 1.2, bph)) * kick_on
+                scrape = math.sin(math.pi * clamp(bph / 1.2)) * kick_on
+                base = bent.lerp(straight, clamp(0.12 + 0.75 * (1 - fight) + 0.15 * sg * n(t + sg, 0.4)))
+                base = base.lerp(limp_l, dead)
+                a = base - vaxis * (0.13 * kick) + vfront * (0.12 * kick)
+                a += vlat * (sg * 0.04 * scrape) - vaxis * (0.05 * scrape)
+                a.z = max(0.075, min(a.z, 0.08 + 0.32 * fly + 0.22 * kick)) if fly < 0.02 else 0.08 + 0.30 * fly
+                a.z += 0.02 * agonal * (1 if s == "R" else 0)
+                plant = yawq(180 - sg * 10) @ q_euler(0, 0, 0)
+                relax = Dv @ q_euler(42, 0, sg * 38)
+                D = plant.slerp(relax, clamp(0.25 + 0.55 * (1 - fight) + 0.4 * kick + 0.5 * fly))
+            ov[s] = (a, D)
+            out = vlat * sg
+            kd[s] = vfront * 1.0 + out * lerp(0.35, 0.9 if s == "L" else 0.25, dead)
+        V.legs_ik(pose, t, knee_dir=kd, override=ov)
+        self._v_ground = dict(fight=fight, bst=bst, bside=bside, bph=bph, eff=eff, pull=pull, b=b,
+                              rip_jolt=rip_jolt, clamp_jolt=clamp_jolt, dead=dead, shock=shock,
+                              agonal=agonal, bre=bre, tear_w=tear_w, ground=ground)
         return pose
 
-    def struggle(self, t):
-        return keys(t, [(self.T_LAND, 0.6), (14.4, 1.0), (16.75, 1.0), (17.15, 0.22), (17.8, 0.1),
-                        (21.5, 0.06), (21.75, 0.32), (22.7, 0.18), (24.0, 0.05), (26.0, 0.0)])
+    def _head_on_ground(self, pose):
+        """keep the back of the skull on (not in) the asphalt."""
+        V = self.V
+        rp = V.rp
+        for _ in range(3):
+            back = rp.point(pose, "head", rp.h_rest["head"] + Vector((0.0, 0.085, 0.09)))
+            top = rp.point(pose, "head", rp.h_rest["head"] + Vector((0.0, 0.0, 0.19)))
+            low = min(back.z, top.z)
+            if low >= 0.075:
+                break
+            fix = min(25.0, (0.075 - low) * 260)
+            for b, w in (("neck01", 0.3), ("neck02", 0.3), ("head", 0.4)):
+                pose["R"][b] = pose["R"][b] @ q_euler(fix * w, 0, 0)
+            rp.fk(pose)
+
+    # ---------------- face: expression units + jaw from the voice
+    def v_face(self, pose, t):
+        V, n = self.V, self.nv
+        env, kind = self._voice_at(t)
+        TN, TI, TL = self.T_V_NOTICE, self.T_IMPACT, self.T_LAND
+        TSH = self.T_SHOCK
+        fear = sstep(TN, TN + 0.15, t) * (1 - sstep(TI, TI + 0.2, t))
+        brace = sstep(13.40, 13.58, t) * (1 - sstep(TI + 0.1, TI + 0.3, t))
+        fight = sstep(TI, TI + 0.1, t) * (1 - sstep(TSH, TSH + 0.3, t))
+        shock = sstep(TSH, TSH + 0.25, t)
+        dead = sstep(24.4, 26.5, t)
+        g = getattr(self, "_v_ground", {}) if t >= TI else {}
+        voc = clamp(env * 1.5)
+        loud = kind in ("scream", "gasp", "grunt", "moan") and env > 0.05
+        # semantic channels
+        scream = (voc if loud else 0.0) * (1 - dead)
+        pain = (0.55 * fight + 0.35 * g.get("bst", 0.0)) * (1 - 0.6 * scream)
+        pain += 0.6 * g.get("clamp_jolt", 0.0) + 0.8 * g.get("rip_jolt", 0.0) * (1 - dead)
+        wide = 0.9 * fear + shock * (0.8 - 0.6 * sstep(TSH + 1.0, 23.0, t)) * (1 - dead)
+        slack = shock * sstep(TSH + 0.5, 23.5, t) * 0.7 + dead
+        u = {}
+        def add(k, v):
+            if v > 1e-4:
+                u[k] = u.get(k, 0.0) + v
+        for side in ("left", "right"):
+            add(f"eyebrows-{side}-inner-up", 1.0 * fear + 0.9 * scream + 0.6 * pain + 0.5 * wide * shock)
+            add(f"eyebrows-{side}-up", 0.6 * fear + 0.3 * wide * shock)
+            add(f"eyebrows-{side}-down", 0.55 * scream * (1 - fear) + 0.75 * pain + 0.5 * brace)
+            add(f"eye-{side}-opened-up", 1.0 * fear * (1 - brace) + 0.55 * wide * shock)
+            add(f"eye-{side}-slit", 0.5 * scream * (1 - fear))
+            add(f"eye-{side}-closure", 0.7 * brace + 0.65 * pain + (0.42 if side == "left" else 0.52) * slack)
+            add(f"nose-{side}-elevation", 0.35 * scream + 0.6 * pain)
+            add(f"nose-{side}-dilatation", 0.5 * fear + 0.3 * scream)
+        add("mouth-retraction", 0.35 * fear + 0.6 * scream + 0.2 * pain)
+        add("mouth-depression-retraction", 0.3 * scream + 0.7 * pain * (1 - scream))
+        add("mouth-upward-retraction", 0.4 * pain * (1 - scream))
+        add("neck-platysma", 0.35 * fear + 1.0 * scream + 0.6 * pain)
+        add("mouth-depression", 0.3 * slack)
+        # blinks (calm only; none once he is dead)
+        blink = twitch(t, [1.4, 4.7, 7.9, 10.3, 11.65, 18.6, 20.3, 22.2], 0.05, 0.12)
+        blink *= (1 - fear) * (1 - fight) * (1 - dead)
+        for side in ("left", "right"):
+            u[f"eye-{side}-closure"] = max(u.get(f"eye-{side}-closure", 0.0), blink)
+        V.expr(pose, u)
+        # jaw: driven by the voice, with a resting gape that depends on his state
+        rest = 1.0 + 5 * fear + 3 * fight + 9 * shock * (1 - dead) + 10 * dead
+        gain = {"scream": 25, "gasp": 22, "breath": 12, "grunt": 13, "wheeze": 12, "moan": 13}.get(kind, 0)
+        jaw = rest + gain * env
+        jaw += 6 * g.get("rip_jolt", 0.0) * (1 - dead) + 3 * g.get("bre", 0.0) * shock * (1 - dead) * 0.5
+        V.face(pose, jaw=jaw)
+
+    # ---------------- arms
+    def _v_hand_spring(self, s, t, target, mode):
+        """hand position with inertia: 'drive' (muscle, springy) or 'limp' (falls under gravity)."""
+        st = getattr(self, "_vh", {})
+        self._vh = st
+        prev = st.get(s)
+        if prev is None or abs(prev[2] - (t - 1.0 / FPS)) > 1e-4:
+            st[s] = (target.copy(), Vector((0, 0, 0)), t)
+            return target
+        p, v, _ = prev
+        p, v = p.copy(), v.copy()
+        sub = 6
+        dt = 1.0 / FPS / sub
+        for _ in range(sub):
+            if mode == "limp":
+                k = 25.0
+                acc = (target - p) * k
+                acc.z = -9.81 * 0.85 if p.z > target.z + 0.002 else (target.z - p.z) * 400
+                v = v * (1 - 4.0 * dt) + acc * dt
+            else:
+                k = 260.0 if mode == "drive" else 120.0
+                acc = (target - p) * k - v * (2 * math.sqrt(k) * 0.9)
+                v = v + acc * dt
+            p = p + v * dt
+            if p.z < 0.045:
+                p.z = 0.045
+                if v.z < 0:
+                    v.z = -v.z * 0.15
+                v.x *= 0.6
+                v.y *= 0.6
+        st[s] = (p, v, t)
+        return p
 
     def victim_arms(self, t, vp, zp):
-        V, n = self.V, self.nv
+        V, Z, n = self.V, self.Z, self.nv
         V.rp.fk(vp)
         if t < self.T_IMPACT:
-            walking, flinch, back = self._v_arm_state
-            for s, sg in (("L", -1), ("R", 1)):
+            walking, jolt, fear, back, brace, breath, trem = self._v_arm_state
+            f, u, l = V.chest_frame(vp)
+            for s, sg in (("L", 1), ("R", -1)):
                 if s == "R":
-                    phone = V.hand_from_chest(vp, s, 0.27, -0.22, -0.10)
-                    defend = V.hand_from_chest(vp, s, 0.32, 0.02, 0.12)
-                    tgt = phone.lerp(defend, sstep(12.8, 13.35, t))
-                    tgt = tgt.lerp(V.hand_from_chest(vp, s, 0.12, -0.2, 0.2), flinch * (1 - sstep(12.8, 13.35, t)) * 0.4)
+                    base = V.hand_from_chest(vp, s, 0.27, -0.22, -0.10)                         # phone
+                    startle = V.hand_from_chest(vp, s, 0.22, -0.09, -0.03)
+                    guard = V.hand_from_chest(vp, s, 0.22, 0.03, -0.07)
+                    cover = V.hand_from_chest(vp, s, 0.19, 0.19, -0.15)
                 else:
                     ph = math.sin(t * 2 * math.pi * 0.9) * walking
-                    swing = V.hand_from_chest(vp, s, 0.06 + 0.13 * ph, -0.52, 0.05)
-                    defend = V.hand_from_chest(vp, s, 0.30, 0.05, 0.15)
-                    tgt = swing.lerp(defend, sstep(12.6, 13.2, t))
-                V.arm_ik(vp, s, tgt, V.arm_pole(vp, s))
-                if s == "R":
-                    V.fingers(vp, s, curl=0.55 * (1 - sstep(12.8, 13.2, t)) + 0.2, spread=0.2, thumb=0.6)
+                    base = V.hand_from_chest(vp, s, 0.06 + 0.13 * ph, -0.52, 0.05)
+                    startle = V.hand_from_chest(vp, s, 0.20, -0.13, 0.08)
+                    guard = V.hand_from_chest(vp, s, 0.27, 0.11, -0.02)
+                    cover = V.hand_from_chest(vp, s, 0.24, 0.23, -0.09)
+                tgt = base.lerp(startle, clamp(max(jolt, 0.75 * fear)) * (1 - back))
+                tgt = tgt.lerp(guard, back).lerp(cover, brace)
+                tgt += Vector((0.006 * n(t + 3 * sg, 9.0), 0.006 * n(t + 5 * sg, 8.0), 0.006 * n(t + 7 * sg, 10.0))) * fear
+                # palm out toward the attacker, fingers up and splayed
+                out = l * sg
+                palm_out = V.hand_frame(s, (u * 0.85 + out * 0.15 + f * 0.1).normalized(), f)
+                V.arm_ik_twist(vp, s, tgt, V.arm_pole(vp, s, back=0.5, out=0.9, down=0.7), palm_out, amount=0.85 * back)
+                if s == "R":     # fingers wrapped round the phone, not a fist
+                    V.fingers(vp, s, curl=lerp(0.42, 0.3, back), spread=0.15 + 0.4 * back, thumb=0.75)
                 else:
-                    V.fingers(vp, s, curl=0.25 + 0.4 * sstep(12.6, 13.2, t), spread=0.5 * flinch)
+                    V.fingers(vp, s, curl=lerp(0.25 + 0.2 * fear, 0.05, back), spread=0.3 * fear + 0.6 * back)
+            V.eyes_at(vp, self._v_look if t >= self.T_V_NOTICE else self._phone_pt(vp), 1.0)
             return
-        T0, T1 = self.T_IMPACT, self.T_LAND
-        str_k = self.struggle(t)
+        # ---------------- falling and on the ground
+        T0, TS, TL = self.T_IMPACT, self.T_SEAT, self.T_LAND
+        l0, cl, t0, t1, rip, ce = self.BITES[0]
+        TSH = self.T_SHOCK
+        g = self._v_ground
+        fight, bst, bside, bph = g["fight"], g["bst"], g["bside"], g["bph"]
+        dead, shock = g["dead"], g["shock"]
         vroot, vfront, vaxis, vlat = self.v_frame(vp)
+        bite = V.rp.point(vp, "neck01", self.vc.bite_point)
+        zr = Z.rp
+        zh0 = zr.h_rest["head"]
+        zface = zr.point(zp, "head", zh0 + Vector((0.0, -0.085, 0.07)))
+        zbrow_r = zr.point(zp, "head", zh0 + Vector((-0.065, -0.06, 0.11)))      # zombie's right temple
+        zjaw_l = zr.point(zp, "jaw", zr.h_rest["jaw"] + Vector((0.05, -0.04, -0.03)))
+        zsh = {k: zp["H"]["upperarm01." + k] for k in ("L", "R")}
+        zchest = zp["H"]["spine01"] + zp["D"]["spine01"] @ Vector((0, -0.10, 0))
+        zcollar = zp["H"]["neck01"] + zp["D"]["neck01"] @ Vector((0, -0.07, -0.02))
         for s, sg in (("L", 1), ("R", -1)):
             sh = vp["H"]["upperarm01." + s]
-            # thrown up / out while falling
-            fling = V.hand_from_chest(vp, s, 0.30, 0.40, 0.42)
-            # pushing the zombie's shoulders (face to face: his right hand -> zombie's left)
-            zs = "L" if s == "R" else "R"
-            push = zp["H"]["upperarm01." + zs] + zp["D"]["upperarm01." + zs] @ Vector((0, 0.03, 0)) - vfront * 0.05
-            push += Vector((0.03 * n(t + sg, 4) * str_k, 0.03 * n(t + 2 * sg, 3.5) * str_k, 0.02 * n(t + 5, 4) * str_k))
-            # limp: palm resting on the asphalt beside his head/shoulder
-            limp = sh + vlat * (sg * 0.44) + vaxis * (0.08 if s == "L" else -0.02)
-            limp.z = 0.045
-            tgt = fling.lerp(push, sstep(T1 - 0.05, T1 + 0.25, t))
-            tgt = limp.lerp(tgt, clamp((str_k - 0.08) * 1.6))
-            V.arm_ik(vp, s, tgt, vlat * sg * 0.9 - vfront * 0.6 - vaxis * 0.2)
-            twitch_f = 0.15 * max(0.0, n(t + 7 * sg, 1.5)) * (1 - sstep(26, 28, t))
-            V.fingers(vp, s, curl=0.25 + 0.45 * str_k + twitch_f, spread=0.5 * str_k, thumb=0.4)
+            lead = 1.0 if bside == sg else 0.4
+            if t < TL + 0.05:
+                # clutching at the attacker's shoulders on the way down, the far arm thrown out
+                # guard crushed between the bodies, then flung out to break the fall, hitting the asphalt
+                w = clamp((t - T0) / (TL - T0))
+                guard = V.hand_from_chest(vp, s, 0.20, 0.06, -0.04)
+                fling = sh + vlat * (sg * 0.40) + vaxis * 0.24 + vfront * 0.22
+                slap = sh + vlat * (sg * 0.46) + vaxis * 0.12
+                slap.z = 0.05
+                tgt = guard.lerp(fling, sstep(0.25, 0.7, w + (0.06 if s == "R" else 0.0)))
+                tgt = tgt.lerp(slap, sstep(0.82, 1.0, w))
+                mode, hand_rot, curl, spread = "drive", None, 0.3, 0.7
+            else:
+                # --- fighting: palm on the zombie's face / temple and on its shoulder or jaw, shoving
+                if s == "L":
+                    contact = zbrow_r.lerp(zface, 0.25 + 0.2 * n(t, 0.8))
+                else:
+                    contact = zsh["L"].lerp(zjaw_l, clamp(0.35 + 0.5 * bst * lead)).lerp(zcollar, 0.25 * (1 - bst))
+                away = (sh - contact).normalized()
+                slip = 0.05 * math.sin(math.pi * clamp((bph - 0.6) / 0.6)) * (1 if bph > 0.6 else 0)
+                push = contact + away * (0.085 - 0.03 * bst * lead) + vaxis * slip
+                push += Vector((0.008 * n(t + 5 * sg, 3.0), 0.008 * n(t + 9 * sg, 3.3), 0.006 * n(t + 2 * sg, 3.6))) * fight
+                # --- shock: arms drop; his left hand finds the wound and presses it, then slips away
+                lie = sh + vlat * (sg * (0.40 if s == "R" else 0.20)) + vaxis * (0.02 if s == "R" else 0.14)
+                lie.z = 0.05
+                wound = bite + vfront * 0.045 + vlat * 0.02 - vaxis * 0.02
+                hold = sstep(17.7, 18.5, t) * (1 - sstep(20.5, 21.05, t)) if s == "L" else 0.0
+                reach = 0.0
+                if s == "R":     # feeble reach for the zombie's shoulder at the second bite
+                    reach = sstep(21.72, 22.1, t) * (1 - sstep(22.35, 22.6, t))
+                tgt = push
+                active = clamp((fight - 0.12) * 1.6)
+                if active < 1.0:
+                    tgt = lie.lerp(push, active)
+                if hold > 0:
+                    tgt = tgt.lerp(wound, hold)
+                if reach > 0:
+                    tgt = tgt.lerp(zsh["L"] + vfront * 0.05, reach * 0.6)
+                mode = "drive" if (active > 0.3 or hold > 0.05 or reach > 0.05) else "limp"
+                f_dir = (contact - sh).normalized()
+                palm = V.hand_frame(s, (f_dir + vaxis * 0.6).normalized(), f_dir)
+                hand_rot = palm if active > 0.2 else None
+                curl = lerp(0.42 + 0.1 * dead, 0.12 + 0.25 * (1 - bst), active)
+                curl = lerp(curl, 0.55, hold) + 0.18 * g["agonal"] * (1 if s == "R" else 0.5)
+                spread = lerp(0.12, 0.65, active)
+            tgt = self._v_hand_spring(s, t, tgt, mode)
+            pole = vlat * sg * 0.8 - vaxis * 0.5 - vfront * 0.25
+            V.arm_ik_twist(vp, s, tgt, pole, hand_rot, amount=0.7)
+            V.fingers(vp, s, curl=curl, spread=spread, thumb=0.45)
+        # eyes: on the attacker while he fights, then staring past it, then fixed
+        if t < TSH + 0.4:
+            V.eyes_at(vp, zface, 1.0)
+        else:
+            V.eyes_at(vp, vp["H"]["head"] + vfront * 2.0 - vaxis * 0.4 + vlat * 0.3, 0.8)
+
+    def _phone_pt(self, vp):
+        return self.V.hand_from_chest(vp, "R", 0.27, -0.22, -0.10) + Vector((0, 0, 0.05))

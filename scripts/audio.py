@@ -15,6 +15,9 @@ import wave
 
 import numpy as np
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import voice as V
+
 SR = 48000
 DUR = 30.0
 N = int(SR * DUR)
@@ -149,6 +152,14 @@ class Mix:
         self.buf[1, i:i + len(seg)] += seg * r * 1.41
         self.rev_send[i:i + len(seg)] += seg * rev
 
+    def place_track(self, x, t0, db=0.0, pan=0.0, rev=0.15, who="v"):
+        """long mono track whose level follows the camera distance shot by shot (10 ms crossfades)."""
+        tt = t0 + np.arange(len(x)) / SR
+        g = np.array([prox(t, who) for t in tt[::240]]).repeat(240)[: len(x)]
+        k = int(0.01 * SR)
+        g = np.convolve(np.pad(g, (k, k), mode="edge"), np.ones(k) / k, mode="same")[k:-k]
+        self.place(x * 10 ** (g / 20), t0, db, pan, rev)
+
     def bed(self, xs, t0, t1, db, fin=0.5, fout=0.5, gain_env=None):
         """stereo (2,n) bed looped/cut to [t0, t1] with fades; optional gain envelope fn(t)."""
         n = int((t1 - t0) * SR)
@@ -256,28 +267,26 @@ def build(T, L):
     roar = norm(L("245223", 0.25, 1.6), -20)
     M.place(fade(fft_filter(roar, None, 1500), 0.03, 0.4), T_N + 0.12, -9, rev=0.3, who="z")
 
-    # ---- sprint: heavy, fast running steps on asphalt at every foot contact
-    run = L("249923")
-    st = [t for t in onsets(run, rise=14, min_gap=0.2) if 0.5 < t < 50]
+    # ---- sprint: running steps on pavement at every foot contact (one step sliced per contact) over
+    # the rustle of clothes in motion - isolated hard clicks in a fast rhythm read as hooves, this does not
+    run = norm(L("547276"), -20)
     steps = []
-    for t in st:
-        s = run[int((t - 0.008) * SR): int((t + 0.2) * SR)]
-        if len(s) > 0.15 * SR and rms_db(s) > -48:
-            steps.append(norm(fade(s, 0.002, 0.08), -20))
-    run2 = L("257700")
-    for t in onsets(run2, rise=14, min_gap=0.2):
-        s = run2[int((t - 0.008) * SR): int((t + 0.2) * SR)]
-        if len(s) > 0.15 * SR:
-            steps.append(norm(fade(s, 0.002, 0.08), -20))
+    for t in onsets(run, rise=12, min_gap=0.18):
+        s_ = run[int((t - 0.01) * SR): int((t + 0.22) * SR)]
+        if len(s_) > 0.18 * SR and rms_db(s_) > -40:
+            steps.append(norm(fade(s_, 0.002, 0.09), -20))
     zsteps = [t for t, k in T["zombie_steps"] if t >= T_L - 0.6]
     for k, ts in enumerate(zsteps):
-        s = steps[(k * 7) % len(steps)]
+        s_ = steps[(k * 7) % len(steps)]
         spd = np.clip((ts - T_L) / 1.6, 0.3, 1.0)
-        body = fft_filter(resample(s, 0.86), None, 3500)
+        body = fft_filter(resample(s_, 0.95 * rng.uniform(0.97, 1.03)), 60, 6000)
         thump = np.zeros_like(body)
-        lp = fft_filter(s, None, 180) * 2.5
+        lp = fft_filter(s_, None, 150) * 1.2
         thump[: len(lp)] = lp[: len(body)]
-        M.place(body + thump, ts, -7 + 4 * spd + rng.uniform(-1.5, 1.5), pan=0.0, rev=0.25, who="z")
+        M.place(body + thump, ts + rng.uniform(-0.004, 0.004), -6 + 4 * spd + rng.uniform(-1.5, 1.5), rev=0.25, who="z")
+    cloth_run = norm(L("611276"), -20)
+    n_run = int((T_LEAP - T_L + 0.15) * SR)
+    M.place(fade(cloth_run[int(2 * SR): int(2 * SR) + n_run], 0.25, 0.1), T_L, -12, rev=0.1, who="z")
     # ragged, snarling breath while running
     pant = norm(L("394941", 1.0, 30.0), -20)
     pant = resample(pant, 1.25)
@@ -297,9 +306,6 @@ def build(T, L):
     for k, (ts, kind) in enumerate(T["victim_steps"]):
         if ts < T_I:
             M.place(wst[(k * 5) % len(wst)], ts, -16, pan=0.0, rev=0.2, who="v")
-    M.place(fade(norm(L("344407", 0.1, 0.65), -20), 0.01, 0.1), T["T_V_NOTICE"] + 0.03, -6, who="v")
-    ms = norm(L("481751"), -18)            # one actor for every scream of the victim
-    M.place(fade(ms[int(12.0 * SR): int(12.62 * SR)], 0.01, 0.06), 12.98, -4, rev=0.3, who="v")
 
     # ---- leap & tackle
     roar2 = norm(L("179345", 0.15, 0.86), -18)
@@ -308,8 +314,8 @@ def build(T, L):
     M.place(fade(hit, 0.001, 0.15), T_I - 0.01, -1, rev=0.25)
     boom = norm(L("415278", 0.0, 1.55), -16)
     M.place(fade(fft_filter(boom, None, 2500), 0.002, 0.6), T_I - 0.01, -8, rev=0.0)
-    oof = norm(L("221544", 0.3, 0.9), -18)
-    M.place(fade(fft_filter(oof, None, 2500), 0.01, 0.2), T_I + 0.03, -9, rev=0.3, who="v")
+    rustle = norm(L("235243"), -20)
+    M.place(fade(rustle[int(0.4 * SR): int(1.3 * SR)], 0.01, 0.3), T_I - 0.02, -10, rev=0.15, who="v")
     fall = norm(L("504626", 0.3, 1.5), -16)
     M.place(fade(fall, 0.003, 0.3), T_LD - 0.12, 0, rev=0.25)
     fall2 = norm(L("675930", 0.78, 1.7), -16)
@@ -397,23 +403,30 @@ def build(T, L):
         if ts < 30:
             M.place(fade(swallow, 0.01, 0.2), ts - 0.18, -4, rev=0.05, who="z")
 
-    # ---- the victim: screams through the bite, shock at the rip, then choking and silence
-    hyper = norm(L("481741", 0.2, 3.0), -20)        # panicked, hyperventilating breaths
-    M.place(fade(hyper, 0.1, 0.1), T_LD + 0.05, -10, rev=0.2, who="v")
-    for (a, b), ts in (((3.0, 3.95), T_LD + 0.1), ((5.1, 6.05), 15.32), ((7.9, 8.85), 16.24)):
-        x = ms[int(a * SR): int(b * SR)]
-        x = x[: max(1, int((end_scream - ts) * SR))]          # cut off at the shock
-        M.place(fade(x, 0.02, 0.05), ts, -4, rev=0.35, who="v")
-    shock = norm(L("271245"), -20)
-    M.place(fade(resample(shock, 0.82), 0.01, 0.2), T_SHOCK + 0.02, -6, who="v")
-    choke = norm(L("482836"), -20)
-    M.place(fade(fft_filter(choke[int(0.2 * SR): int(4.6 * SR)], None, 3000), 0.3, 1.2), T_SHOCK + 0.35, -11, who="v")
-    weak = fft_filter(ms[int(10.4 * SR): int(11.3 * SR)], None, 1800)
-    M.place(fade(weak, 0.05, 0.25), BITES[1][1] + 0.15, -15, rev=0.3, who="v")
-    gurgle = norm(L("826999"), -20)
-    M.place(fade(fft_filter(gurgle, None, 2500), 0.3, 1.5), 22.4, -18, who="v")
-    breath = norm(L("653104"), -20)
-    M.place(fade(breath[: int(3.5 * SR)], 0.4, 1.5), 19.2, -16, who="v")
+    # ---- the victim's voice: one actor, cut on his breaths, on the story beats (scripts/voice.py)
+    vox, spans = V.render(T, L.d)
+    M.place_track(vox, 0.0, +2, rev=0.28, who="v")
+    # ---- struggle foley, on the same bursts that drive his body (voice.bursts)
+    env, _ = V.envelope(vox, spans)
+    grab = norm(L("237047"), -20)
+    grab_on = [t for t in onsets(grab, rise=10, min_gap=0.35) if t < 36]
+    scrape = norm(L("329514"), -20)
+    scr_on = onsets(scrape, rise=9, min_gap=0.4)
+    scuff = norm(L("437946"), -20)
+    scuff_on = [t for t in onsets(scuff, rise=12, min_gap=0.3) if t < 33]
+    slap = norm(L("812359"), -18)
+    for k, (tb, side, a) in enumerate(V.bursts(env, T)):
+        g0 = grab_on[(k * 3) % len(grab_on)]
+        M.place(fade(grab[int((g0 - 0.02) * SR): int((g0 + 0.45) * SR)], 0.01, 0.15), tb - 0.02, -12, pan=0.15 * side, rev=0.1, who="v")
+        s0 = scr_on[k % len(scr_on)]
+        M.place(fade(fft_filter(scrape[int((s0 - 0.02) * SR): int((s0 + 0.5) * SR)], 120, 6000), 0.01, 0.2), tb + 0.08, -12, pan=-0.25 * side, rev=0.12, who="v")
+        if k % 2 == 0:
+            c0 = scuff_on[(k * 5) % len(scuff_on)]
+            M.place(fade(fft_filter(scuff[int((c0 - 0.01) * SR): int((c0 + 0.18) * SR)], None, 3000), 0.003, 0.08), tb + 0.42, -14, rev=0.1, who="v")
+        if k % 3 == 0:
+            M.place(fade(slap, 0.002, 0.1), tb, -15, rev=0.05, who="v")
+    # his hand finds the wound: a wet press
+    M.place(fade(slime[int(4.0 * SR): int(4.6 * SR)], 0.05, 0.3), 17.75, -17, who="v")
     return M.master()
 
 

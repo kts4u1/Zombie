@@ -17,6 +17,23 @@ if threads:
     sc.render.threads_mode = "FIXED"
     sc.render.threads = threads
 os.makedirs(outdir, exist_ok=True)
+# close-up shots render natively at 1280x720 with more samples (scene property set by build_scene)
+hq = []
+for r in str(sc.get("hq_ranges", "")).split(","):
+    if "-" in r:
+        a, b = r.split("-")
+        hq.append((int(a), int(b)))
+base = (sc.render.resolution_x, sc.render.resolution_y, sc.cycles.samples, sc.cycles.adaptive_threshold)
+
+
+def quality(f):
+    if any(a <= f <= b for a, b in hq):
+        sc.render.resolution_x, sc.render.resolution_y = 1280, 720
+        sc.cycles.samples = int(sc.get("hq_samples", 10))
+        sc.cycles.adaptive_threshold = 0.03
+    else:
+        sc.render.resolution_x, sc.render.resolution_y, sc.cycles.samples, sc.cycles.adaptive_threshold = base
+
 frames = range(end, start - 1, -1) if reverse else range(start, end + 1)
 for f in frames:
     path = os.path.join(outdir, "f%04d.png" % f)
@@ -28,6 +45,7 @@ for f in frames:
     except FileExistsError:
         continue
     sc.frame_set(f)
+    quality(f)
     sc.render.filepath = path
     t = time.time()
     bpy.ops.render.render(write_still=True)
